@@ -47,12 +47,12 @@ def _test()->int:
     data=PolicyData(empresa_normalizada="THI",orgao="Órgão teste",numero_concorrencia_normalizado="1-2026",vigencia_data_inicial=date(2026,1,1),vigencia_data_final=date(2026,12,31),par_coerente=True,confianca_geral=.95,evidencias=evidence)
     require_minimum(data);log.info("Smoke test local concluído; validação estrutural e de confiança OK");return 0
 
-def process_message(message:MailMessage,control:RobotControl,client=None,dry_run:bool=False,root_dir:Path|None=None,policies_excel:Path|None=None,backup_dir:Path|None=None,temp_root:Path|None=None,history_root:Path|None=None,mode:str|None=None)->str:
+def process_message(message:MailMessage,control:RobotControl,client=None,dry_run:bool=False,root_dir:Path|None=None,policies_excel:Path|None=None,backup_dir:Path|None=None,temp_root:Path|None=None,history_root:Path|None=None,mode:str|None=None,retry_errors:bool=False)->str:
     """Classifica uma vez; analisa/publica cada par independentemente."""
     client=client or _client();root_dir=root_dir or settings.root_dir;policies_excel=policies_excel or settings.policies_excel
     backup_dir=backup_dir or Path("backups");temp_root=temp_root or Path("data/temp");history_root=history_root or Path("data/historico")
     ident=hashlib.sha256((message.message_id or message.uid).encode()).hexdigest()[:24]
-    if not control.can_retry(message.message_id,message.uid):
+    if not control.can_retry(message.message_id,message.uid,force_retry_error=retry_errors):
         log.warning("[%s] Limite de tentativas do e-mail atingido; revisão manual",ident);return "IGNORADO"
     attempt=control.attempts(message.message_id,message.uid)+1
     process_id=control.begin(message_id=message.message_id,uid=message.uid,data_email=message.date,remetente=message.sender,assunto=message.subject,modelo_ia=settings.openrouter_model)
@@ -88,9 +88,13 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
         _write_json(history/"metadata.json",metadata)
         for index,group in enumerate(groups,1):
             detail=metadata["lotes"][index-1];group_key=_group_key(group,index);detail["group_key"]=group_key
+            prior_group=control.find(message.message_id,message.uid,group_key)
+            if retry_errors and prior_group and prior_group.get("status")=="IGNORADO":
+                detail.update(status="IGNORADO",observacao="Grupo IGNORADO preservado; --retry-errors só reprocessa ERRO")
+                continue
             if group.problema:
                 detail.update(status="ERRO",erro=group.problema)
-                if control.can_retry(message.message_id,message.uid,group_key):
+                if control.can_retry(message.message_id,message.uid,group_key,force_retry_error=retry_errors):
                     issue_process=control.begin(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,modelo_ia=settings.openrouter_model)
                     control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,status="ERRO",erro=group.problema,modelo_ia=settings.openrouter_model,id_processamento=issue_process)
                 else:detail["erro"]="Limite de tentativas do grupo atingido; revisão manual"
@@ -107,7 +111,7 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
                 control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=reused_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="SUCESSO",erro=None,modelo_ia=settings.openrouter_model,id_processamento=earlier.get("id_processamento") if earlier else process_id)
                 detail.update(status="SUCESSO",lote=reused_lot,lote_associado=group.lote,id_processamento_anterior=earlier.get("id_processamento") if earlier else None,observacao="Par já processado em outra mensagem; sem chamada OpenRouter")
                 continue
-            if not control.can_retry(message.message_id,message.uid,group_key):
+            if not control.can_retry(message.message_id,message.uid,group_key,force_retry_error=retry_errors):
                 detail.update(status="ERRO",erro="Limite de tentativas do grupo atingido; revisão manual")
                 issues.append(f"Grupo {group_key}: limite de tentativas atingido")
                 continue
@@ -155,6 +159,8 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
         valid_statuses={"SUCESSO"}
         if dry_run and statuses and all(status in {"DRY_RUN","SUCESSO"} for status in statuses):
             overall="IGNORADO";error="DRY_RUN: análise concluída sem publicação"
+        elif retry_errors and statuses and "IGNORADO" in statuses and all(status in {"SUCESSO","IGNORADO"} for status in statuses):
+            overall="IGNORADO";error="Um ou mais grupos permanecem IGNORADO; --retry-errors só reprocessa ERRO"
         elif statuses and all(status in valid_statuses for status in statuses) and not issues:
             overall="SUCESSO";error=None
         elif not groups and not issues:
@@ -173,7 +179,8 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
         except Exception:log.exception("[%s] Não foi possível persistir o erro do e-mail",process_id)
         return "SEM_PDFS" if metadata.get("quantidade_pdfs",0)<2 else "ERRO"
 
-def run(dry_run:bool=False,backfill_period:tuple[date,date]|None=None)->int:
+def run(dry_run:bool=False,backfill_period:tuple[date,date]|None=None,retry_errors:bool=False)->int:
+    if retry_errors and backfill_period is None:raise ValueError("--retry-errors só pode ser usado com --backfill")
     dry_run=dry_run or settings.dry_run
     if not settings.email_user or not settings.email_password:raise RuntimeError("Preencha EMAIL_USER e EMAIL_PASSWORD no .env")
     if not settings.allowed_sender_domains:raise RuntimeError("ALLOWED_SENDER_DOMAINS deve conter ao menos um domínio autorizado")
@@ -186,10 +193,12 @@ def run(dry_run:bool=False,backfill_period:tuple[date,date]|None=None)->int:
                 had_relevant=True
                 prior=control.find(message.message_id,message.uid)
                 if prior and prior.get("status")=="SUCESSO":counts["IGNORADO"]+=1;continue
-                if not control.can_retry(message.message_id,message.uid):
+                if retry_errors and prior and prior.get("status")=="IGNORADO":
+                    log.info("Mensagem %s permanece IGNORADO; --retry-errors só reprocessa ERRO",message.message_id or message.uid);counts["IGNORADO"]+=1;continue
+                if not control.can_retry(message.message_id,message.uid,force_retry_error=retry_errors):
                     log.warning("Mensagem %s excedeu tentativas; ignorada para revisão",message.message_id or message.uid);counts["IGNORADO"]+=1;continue
                 if client is None:client=CountingOpenRouter(_client())
-                try:result=process_message(message,control,client=client,dry_run=dry_run,mode=mode)
+                try:result=process_message(message,control,client=client,dry_run=dry_run,mode=mode,retry_errors=retry_errors)
                 except Exception as exc:
                     log.exception("Falha inesperada no e-mail %s; continuando lote",message.message_id or message.uid)
                     try:control.record(message_id=message.message_id,uid=message.uid,status="ERRO",erro=str(exc)[:1000],modelo_ia=settings.openrouter_model)
@@ -221,11 +230,13 @@ def main()->int:
     parser=argparse.ArgumentParser(description="Robô local de controle de apólices THI/PHAS")
     parser.add_argument("--test",action="store_true",help="smoke test offline");parser.add_argument("--dry-run",action="store_true",help="analisa e valida sem publicar documentos ou atualizar Excel operacional")
     parser.add_argument("--backfill",action="store_true",help="processa mensagens de um período histórico inclusivo");parser.add_argument("--inicio",type=parse_backfill_date,help="data inicial DD/MM/AAAA");parser.add_argument("--fim",type=parse_backfill_date,help="data final inclusiva DD/MM/AAAA")
+    parser.add_argument("--retry-errors",action="store_true",help="no backfill, libera novas tentativas apenas para registros ERRO, preservando sucessos e tentativas")
     args=parser.parse_args()
     if args.backfill and (args.inicio is None or args.fim is None):parser.error("--backfill exige --inicio e --fim no formato DD/MM/AAAA")
     if not args.backfill and (args.inicio is not None or args.fim is not None):parser.error("--inicio e --fim só podem ser usados com --backfill")
+    if args.retry_errors and not args.backfill:parser.error("--retry-errors só pode ser usado com --backfill")
     if args.backfill and args.fim<args.inicio:parser.error("--fim deve ser igual ou posterior a --inicio")
     if args.test and (args.backfill or args.dry_run):parser.error("--test offline não pode ser combinado com --backfill ou --dry-run")
-    try:return _test() if args.test else run(args.dry_run,(args.inicio,args.fim) if args.backfill else None)
+    try:return _test() if args.test else run(args.dry_run,(args.inicio,args.fim) if args.backfill else None,retry_errors=args.retry_errors)
     except Exception as exc:log.exception("Execução interrompida: %s",exc);return 1
 if __name__=="__main__":sys.exit(main())

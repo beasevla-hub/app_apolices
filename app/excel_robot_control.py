@@ -70,9 +70,14 @@ class RobotControl:
         return match(state(counts),state(known))
     def attempts(self,message_id:str,uid:str="",group_key:str|None=None)->int:
         record=self.find(message_id,uid,group_key);return int(record.get("tentativas") or 0) if record else 0
-    def can_retry(self,message_id:str,uid:str="",group_key:str|None=None)->bool:
+    def can_retry(self,message_id:str,uid:str="",group_key:str|None=None,force_retry_error:bool=False)->bool:
         row=self.find(message_id,uid,group_key)
-        return not row or (row.get("status")!="SUCESSO" and int(row.get("tentativas") or 0)<self.max_attempts)
+        if not row:return True
+        status=row.get("status")
+        if status=="SUCESSO":return False
+        if force_retry_error and status=="IGNORADO":return False
+        if force_retry_error and status=="ERRO":return True
+        return int(row.get("tentativas") or 0)<self.max_attempts
     def begin(self,**data)->str:
         process_id=data.get("id_processamento") or uuid4().hex[:12].upper()
         data.update(status="PROCESSANDO",erro=None,pasta_destino=None,id_processamento=process_id,increment_attempt=True)

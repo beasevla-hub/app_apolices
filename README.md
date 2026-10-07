@@ -36,9 +36,12 @@ O dry-run conecta ao IMAP/OpenRouter e processa a classificação e as análises
 ```powershell
 python -m app.main --backfill --inicio 01/08/2026 --fim 30/09/2026
 python -m app.main --backfill --inicio 01/08/2026 --fim 30/09/2026 --dry-run
+python -m app.main --backfill --inicio 21/09/2026 --fim 07/10/2026 --retry-errors
 ```
 
 Datas usam `DD/MM/AAAA`; ambas as extremidades são inclusivas. A busca IMAP usa `SINCE início` e `BEFORE (fim + 1 dia)`, inclui e-mails lidos, filtra os domínios permitidos e não aplica `UNSEEN` nem `MAX_EMAILS_PER_RUN`. A data inválida ou invertida é rejeitada antes de conectar.
+
+`--retry-errors` só pode ser combinado com `--backfill`. É uma opção explícita para reprocessar registros com status `ERRO` após correções do robô, mesmo quando já atingiram `ROBOT_MAX_ATTEMPTS`. Não altera o contador histórico: cada nova tentativa o incrementa. Registros `SUCESSO` continuam ignorados e `IGNORADO` não é convertido em erro nem reprocessado por essa opção. Em e-mails multilote, o override é aplicado por `group_key`: grupos `SUCESSO` são pulados, somente grupos `ERRO` podem ser retomados. A classificação existente é reutilizada quando os hashes dos PDFs coincidem; não há nova chamada de classificação nesse caso. Sem `--retry-errors`, o limite normal permanece inalterado.
 
 Uma falha em um grupo ou e-mail não interrompe os demais. Em perda de transporte IMAP, o cliente fecha o socket quebrado, reconecta com espera limitada de 2/4/8 segundos, seleciona novamente a pasta e repete o UID atual. Se os retries se esgotarem, o lote para com **resumo parcial explícito**; sucessos já persistidos continuam registrados e podem ser retomados sem reanálise.
 

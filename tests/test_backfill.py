@@ -114,3 +114,17 @@ def test_imap_reconnect_failure_is_bounded_and_transport_not_document_error(monk
     with pytest.raises(IMAPConnectionLost,match='lote parcialmente processado'):
         list(client._messages_from_uids([b'9']))
     assert attempts['count']==2
+
+
+def test_retry_errors_cli_requires_backfill_and_passes_flag(monkeypatch):
+    import sys
+    import app.main as main_module
+    with pytest.raises(SystemExit) as error:
+        monkeypatch.setattr(sys,'argv',['app.main','--retry-errors'])
+        main_module.main()
+    assert error.value.code==2
+    calls={}
+    monkeypatch.setattr(main_module,'run',lambda dry_run,period,retry_errors=False:calls.update(dry_run=dry_run,period=period,retry_errors=retry_errors) or 0)
+    monkeypatch.setattr(sys,'argv',['app.main','--backfill','--inicio','21/09/2026','--fim','07/10/2026','--retry-errors'])
+    assert main_module.main()==0
+    assert calls=={'dry_run':False,'period':(date(2026,9,21),date(2026,10,7)),'retry_errors':True}

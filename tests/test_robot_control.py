@@ -24,3 +24,26 @@ def test_group_attempts_and_duplicate_hashes_are_scoped_by_lot(tmp_path):
     assert not ctl.already_processed('',{'same-policy','same-bill'},lot='03')
     assert ctl.all_attachments_processed(['same-policy','same-bill','same-policy','same-bill'])
     assert not ctl.all_attachments_processed(['same-policy','same-bill','extra'])
+
+
+def test_force_retry_error_overrides_only_error_status_and_keeps_attempt_history(tmp_path):
+    ctl=RobotControl(tmp_path/'robot.xlsx',max_attempts=5)
+    for mid,status,attempts in [('success','SUCESSO',5),('error5','ERRO',5),('error10','ERRO',10),('ignored','IGNORADO',5)]:
+        ctl.record(message_id=mid,status=status,tentativas=attempts)
+    assert not ctl.can_retry('success',force_retry_error=True)
+    assert not ctl.can_retry('error5')
+    assert ctl.can_retry('error5',force_retry_error=True)
+    assert ctl.can_retry('error10',force_retry_error=True)
+    assert not ctl.can_retry('ignored',force_retry_error=True)
+    assert ctl.attempts('error5')==5
+    ctl.begin(message_id='error5')
+    assert ctl.attempts('error5')==6
+
+
+def test_force_retry_does_not_change_normal_retry_limit(tmp_path):
+    ctl=RobotControl(tmp_path/'robot.xlsx',max_attempts=5)
+    ctl.record(message_id='error',status='ERRO',tentativas=5)
+    ctl.record(message_id='ignored',status='IGNORADO',tentativas=2)
+    assert not ctl.can_retry('error')
+    assert ctl.can_retry('ignored')
+    assert not ctl.can_retry('ignored',force_retry_error=True)

@@ -129,3 +129,24 @@ def test_documentary_lot_conflict_with_associated_group_is_rejected(tmp_path):
     row=next(row for row in control.rows() if (row.get('group_key') or '').startswith('PAIR-'))
     assert row['status']=='ERRO' and 'não confirma associação' in row['erro']
     assert not (tmp_path/'docs').exists() and load_workbook(excel)['APÓLICES'].max_row==1
+
+
+def test_retry_errors_reuses_classification_and_reanalyzes_only_failed_group(tmp_path):
+    names=[f'{kind}_{idx:02d}.pdf' for idx in range(1,4) for kind in ('policy','bill')]
+    message=make_message(tmp_path,names,'retry-errors-groups@example')
+    groups=[g('01','policy_01.pdf','bill_01.pdf'),g('02','policy_02.pdf','bill_02.pdf'),g('03','policy_03.pdf','bill_03.pdf')]
+    client=GroupClient(groups,fail_once='02')
+    excel=tmp_path/'ops.xlsx';setup_excel(excel);control=RobotControl(tmp_path/'robot.xlsx',max_attempts=1);counting=CountingOpenRouter(client)
+    kwargs=dict(root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history',mode='BACKFILL')
+    assert process_message(message,control,counting,**kwargs)=='ERRO'
+    assert counting.classifications==1 and counting.analyses==3
+    rows=[row for row in control.rows() if (row.get('group_key') or '').startswith('PAIR-')]
+    assert sorted(row['status'] for row in rows)==['ERRO','SUCESSO','SUCESSO']
+    attempts_before={row['group_key']:row['tentativas'] for row in rows}
+    assert max(attempts_before.values())==1
+    assert process_message(message,control,counting,retry_errors=True,**kwargs)=='SUCESSO'
+    # A classificação vem do cache e apenas o grupo 02 recebe uma nova análise.
+    assert counting.classifications==1 and counting.analyses==4
+    rows=[row for row in control.rows() if (row.get('group_key') or '').startswith('PAIR-')]
+    assert all(row['status']=='SUCESSO' for row in rows)
+    assert sorted(row['tentativas'] for row in rows)==[1,1,2]
