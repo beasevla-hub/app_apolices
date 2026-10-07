@@ -80,7 +80,7 @@ def update_workbook(path:Path,data:PolicyData,backup_dir:Path)->str:
             headers["LOTE"]=col
         else:headers=_header_map(ws)
     company=data.empresa_normalizada or data.tipo_empresa
-    process=_norm(data.processo_sei);number=_norm(data.numero_concorrencia_normalizado);org=_norm(data.orgao_normalizado or data.orgao);lot=_norm_lot(data.lote)
+    process=_norm(data.processo_sei);number=_norm(data.numero_concorrencia_normalizado);org=_norm(data.orgao_normalizado or data.orgao);lot=_norm_lot(data.lote_operacional)
     if not company or not number or not (process or org):raise ValueError("Chave lógica insuficiente; revisão manual necessária")
     matches=[]
     for row in range(2,ws.max_row+1):
@@ -97,7 +97,7 @@ def update_workbook(path:Path,data:PolicyData,backup_dir:Path)->str:
     if len(matches)>1:raise ValueError("POSSIVEL_DUPLICATA: múltiplas linhas correspondem à chave; sem alteração")
     existing=bool(matches);row=matches[0] if existing else _available_row(ws)
     if not existing and row==ws.max_row+1 and row>2:_copy_row_style(ws,row-1,row)
-    values={"ÓRGÃO":data.orgao,"EMPRESA":data.empresa or company,"Nº CONCORRÊNCIA/EDITAL":data.numero_concorrencia_original or data.numero_concorrencia_normalizado,"PROCESSO SEI":data.processo_sei,"OBJETO":data.objeto,"VIGÊNCIA DATA INICIAL":data.vigencia_data_inicial,"VIGÊNCIA DATA FINAL":data.vigencia_data_final,"VALOR DO PRÊMIO":data.valor_premio,"Nº REGISTRO DA SUSEP":data.numero_registro_susep,"Nº DA LINHA DIGITÁVEL DO BOLETO":data.linha_digitavel_boleto,"LOTE":data.lote}
+    values={"ÓRGÃO":data.orgao,"EMPRESA":data.empresa or company,"Nº CONCORRÊNCIA/EDITAL":data.numero_concorrencia_original or data.numero_concorrencia_normalizado,"PROCESSO SEI":data.processo_sei,"OBJETO":data.objeto,"VIGÊNCIA DATA INICIAL":data.vigencia_data_inicial,"VIGÊNCIA DATA FINAL":data.vigencia_data_final,"VALOR DO PRÊMIO":data.valor_premio,"Nº REGISTRO DA SUSEP":data.numero_registro_susep,"Nº DA LINHA DIGITÁVEL DO BOLETO":data.linha_digitavel_boleto,"LOTE":data.lote_operacional}
     for name,value in values.items():
         if value is not None:ws.cell(row,headers[name]).value=value
     if is_new and ws.auto_filter.ref is None:ws.auto_filter.ref=ws.dimensions

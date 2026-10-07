@@ -38,7 +38,7 @@ class RobotControl:
                 text=" ".join(str(value or "").casefold().split())
                 return (text[5:].strip() if text.startswith("lote ") else text) or None
             stored_lot=normalized(row.get("lote"));requested_lot=normalized(lot)
-            return bool(hashes) and hashes.issubset(stored) and stored_lot==requested_lot
+            return bool(hashes) and hashes.issubset(stored) and (requested_lot is None or stored_lot==requested_lot)
         return any(row.get("status")=="SUCESSO" and ((message_id and row.get("message_id")==message_id) or same_documents(row)) for row in self.rows())
     def all_attachments_processed(self,hashes:list[str])->bool:
         """True apenas se todos os PDFs formarem pares exatos já concluídos, sem anexos extra."""

@@ -102,9 +102,10 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
                 detail.update(status="SUCESSO",id_processamento_anterior=previous.get("id_processamento"),observacao="Par já processado; sem nova chamada OpenRouter")
                 continue
             if control.already_processed("",{policy_hash,bill_hash},lot=group.lote):
-                earlier=next((row for row in control.rows() if row.get("status")=="SUCESSO" and row.get("hash_apolice")==policy_hash and row.get("hash_boleto")==bill_hash and (row.get("lote") or None)==(group.lote or None)),None)
-                control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,hash_apolice=policy_hash,hash_boleto=bill_hash,status="SUCESSO",erro=None,modelo_ia=settings.openrouter_model,id_processamento=earlier.get("id_processamento") if earlier else process_id)
-                detail.update(status="SUCESSO",id_processamento_anterior=earlier.get("id_processamento") if earlier else None,observacao="Par já processado em outra mensagem; sem chamada OpenRouter")
+                earlier=next((row for row in control.rows() if row.get("status")=="SUCESSO" and row.get("hash_apolice")==policy_hash and row.get("hash_boleto")==bill_hash and (group.lote is None or (row.get("lote") or None)==group.lote)),None)
+                reused_lot=group.lote if group.lote is not None else (earlier.get("lote") if earlier else None)
+                control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=reused_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="SUCESSO",erro=None,modelo_ia=settings.openrouter_model,id_processamento=earlier.get("id_processamento") if earlier else process_id)
+                detail.update(status="SUCESSO",lote=reused_lot,lote_associado=group.lote,id_processamento_anterior=earlier.get("id_processamento") if earlier else None,observacao="Par já processado em outra mensagem; sem chamada OpenRouter")
                 continue
             if not control.can_retry(message.message_id,message.uid,group_key):
                 detail.update(status="ERRO",erro="Limite de tentativas do grupo atingido; revisão manual")
@@ -114,7 +115,7 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
             detail.update(status="PROCESSANDO",id_processamento=group_process)
             metadata["chamadas_openrouter"]={"classificacao":classification_calls,"analises":analysis_calls,"total":classification_calls+analysis_calls}
             _write_json(history/"metadata.json",metadata)
-            created=[];destination=None
+            created=[];destination=None;operational_lot=group.lote
             try:
                 policy_analysis=first_pages(policy,temp/(policy.stem+"_analise.pdf"))
                 analysis_calls+=1
@@ -122,16 +123,18 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
                 if group.lote is None:raw_result=client.analyze(policy_analysis,bill)
                 else:raw_result=client.analyze(policy_analysis,bill,expected_lot=group.lote)
                 lot_result_path=history/"lotes"/group_key/"resultado.json";_write_json(lot_result_path,raw_result)
-                data=validate_policy(raw_result);require_minimum(data)
-                if group.lote is not None and (data.lote is None or not _lot_equal(group.lote,data.lote)):
+                data=validate_policy(raw_result,lote_associado=group.lote)
+                if group.lote is not None and data.lote is not None and not _lot_equal(group.lote,data.lote):
                     raise ValueError(f"Lote da análise ({data.lote!r}) não confirma associação classificada ({group.lote!r})")
+                require_minimum(data,lote_associado=group.lote)
                 if data.lote is not None and "lote" not in data.evidencias:raise ValueError("Extração retornou lote sem evidência; revisão manual")
-                group_label=lot_label(data.lote or group.lote, f"GRUPO {index:02d}") if multiple_lots else None
-                detail.update(lote=data.lote,grupo_pasta=group_label,resultado="lotes/"+group_key+"/resultado.json")
+                operational_lot=data.lote_operacional
+                group_label=lot_label(operational_lot, f"GRUPO {index:02d}") if multiple_lots else None
+                detail.update(lote=operational_lot,lote_associado=group.lote,lote_documental=data.lote,grupo_pasta=group_label,resultado="lotes/"+group_key+"/resultado.json")
                 if dry_run:
                     from .file_manager import build_destination,build_document_names
                     detail.update(status="DRY_RUN",destino_previsto=str(build_destination(root_dir,data,multiple_lots,group_label)),nomes_previstos=list(build_document_names(data,multiple_lots,group_label)))
-                    control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=data.lote,hash_apolice=policy_hash,hash_boleto=bill_hash,status="IGNORADO",erro="DRY_RUN: lote analisado sem publicação",modelo_ia=settings.openrouter_model,id_processamento=group_process)
+                    control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="IGNORADO",erro="DRY_RUN: lote analisado sem publicação",modelo_ia=settings.openrouter_model,id_processamento=group_process)
                 else:
                     destination,created=publish(root_dir,data,policy,bill,return_created=True,multiple_lots=multiple_lots,group_label=group_label)
                     try:update_workbook(policies_excel,data,backup_dir)
@@ -140,11 +143,11 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
                             try:target.unlink(missing_ok=True)
                             except OSError:log.exception("[%s] Rollback do grupo %s falhou",process_id,group_key)
                         raise
-                    control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=data.lote,hash_apolice=policy_hash,hash_boleto=bill_hash,status="SUCESSO",modelo_ia=settings.openrouter_model,pasta_destino=str(destination),id_processamento=group_process)
+                    control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="SUCESSO",modelo_ia=settings.openrouter_model,pasta_destino=str(destination),id_processamento=group_process)
                     detail.update(status="SUCESSO",destino=str(destination),id_processamento=group_process)
             except Exception as exc:
                 log.exception("[%s] Grupo %s falhou; os demais grupos continuarão",process_id,group_key)
-                control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,hash_apolice=policy_hash,hash_boleto=bill_hash,status="ERRO",erro=str(exc)[:1000],modelo_ia=settings.openrouter_model,id_processamento=group_process,pasta_destino=str(destination) if destination else None)
+                control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="ERRO",erro=str(exc)[:1000],modelo_ia=settings.openrouter_model,id_processamento=group_process,pasta_destino=str(destination) if destination else None)
                 detail.update(status="ERRO",erro=str(exc)[:1000]);issues.append(f"Grupo {group_key}: {exc}")
             results.append(dict(detail))
         if issues:metadata["issues"]=issues

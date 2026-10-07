@@ -24,6 +24,8 @@ class Settings:
     policies_excel: Path = Path(os.getenv("CONTROLE_APOLICES", "controle_apolices.xlsx"))
     thi_names: str = os.getenv("THI_NAMES", "THI ENGENHARIA E ARQUITETURA LTDA")
     phas_names: str = os.getenv("PHAS_NAMES", "PHAS ENGENHARIA, CONSTRUÇÕES E SERVIÇOS LTDA-ME")
+    thi_cnpj: str = os.getenv("THI_CNPJ", "09.195.930/0001-12")
+    phas_cnpj: str = os.getenv("PHAS_CNPJ", "")
     dry_run: bool = os.getenv("DRY_RUN", "false").lower() in {"1", "true", "yes"}
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     max_emails_per_run: int = int(os.getenv("MAX_EMAILS_PER_RUN", "100"))

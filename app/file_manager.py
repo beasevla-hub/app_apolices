@@ -18,7 +18,7 @@ def lot_label(lot:str|None,unknown_group:str|None=None)->str|None:
 def build_document_names(data:PolicyData,multiple_lots:bool=False,group_label:str|None=None)->tuple[str,str]:
     org=sanitize_filename(data.orgao_normalizado or data.orgao or "ORGAO")
     number=sanitize_filename(data.numero_concorrencia_normalizado or "CONCORRENCIA-NAO-INFORMADA")
-    suffix=lot_label(data.lote,group_label) if multiple_lots else None
+    suffix=lot_label(data.lote_operacional,group_label) if multiple_lots else None
     base=sanitize_filename(f"{org} - {number}"+(f" - {suffix}" if suffix else ""))
     return f"01. APOLICE - {base}.pdf",f"08. BOLETO - {base}.pdf"
 def build_destination(root:Path,data:PolicyData,multiple_lots:bool=False,group_label:str|None=None)->Path:
@@ -28,7 +28,7 @@ def build_destination(root:Path,data:PolicyData,multiple_lots:bool=False,group_l
     org=sanitize_filename(data.orgao_normalizado or data.orgao or "ORGAO")
     number=sanitize_filename(data.numero_concorrencia_normalizado or "")
     destination=Path(root)/data.empresa_normalizada/folder_date/sanitize_filename(f"{org} - {number}")
-    suffix=lot_label(data.lote,group_label) if multiple_lots else None
+    suffix=lot_label(data.lote_operacional,group_label) if multiple_lots else None
     return destination/suffix if suffix else destination
 def publish(root:Path,data:PolicyData,policy:Path,bill:Path,return_created:bool=False,multiple_lots:bool=False,group_label:str|None=None):
     destination=build_destination(root,data,multiple_lots,group_label);destination.mkdir(parents=True,exist_ok=True)

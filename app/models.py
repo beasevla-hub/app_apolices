@@ -15,12 +15,14 @@ class PolicyData(BaseModel):
     empresa:str|None=None
     empresa_normalizada:Literal["THI","PHAS"]|None=None
     tipo_empresa:Literal["THI","PHAS"]|None=None
+    cnpj:str|None=None
     orgao:str|None=None
     orgao_normalizado:str|None=None
     numero_concorrencia_original:str|None=None
     numero_concorrencia_normalizado:str|None=None
     processo_sei:str|None=None
     lote:str|None=None
+    lote_associado:str|None=None
     par_coerente:bool|None=None
     objeto:str|None=None
     vigencia_data_inicial:date|None=None
@@ -60,5 +62,13 @@ class PolicyData(BaseModel):
     def confidence_for(self,field_name:str)->float:
         evidence=self.evidencias.get(field_name)
         return evidence.confianca if evidence else self.confianca_geral
+    @property
+    def lote_operacional(self)->str|None:
+        """Lote para organização operacional, sem alterar o dado documental extraído."""
+        return self.lote_associado if self.lote_associado is not None else self.lote
+    @property
+    def lote_documental(self)->str|None:
+        """Identificador de lote efetivamente retornado pela extração documental."""
+        return self.lote
     def minimum_data_present(self)->bool:
         return all((self.empresa_normalizada,self.orgao,self.numero_concorrencia_normalizado,self.vigencia_data_inicial,self.vigencia_data_final))

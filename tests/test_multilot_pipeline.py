@@ -97,3 +97,35 @@ def test_other_only_message_is_ignored_without_policy_analysis(tmp_path):
     assert status=='IGNORADO' and counting.classifications==1 and counting.analyses==0
     assert control.find(message.message_id,message.uid)['status']=='IGNORADO'
     assert not (tmp_path/'docs').exists() and load_workbook(excel)['APÓLICES'].max_row==1
+
+
+def test_associated_lot_is_operational_when_policy_has_no_documentary_lot(tmp_path):
+    message=make_message(tmp_path,['policy.pdf','bill.pdf'],'associated-only@example')
+    class AssociatedOnlyClient:
+        def classify(self,files,names):return {'grupos':[g('1','policy.pdf','bill.pdf')],'outros':[],'observacoes':None}
+        def analyze(self,policy,bill,expected_lot=None):
+            return raw_result(lote={'valor':None,'fonte':'NAO_IDENTIFICADO','confianca':.1})
+    status,control,excel,counting=run_process(tmp_path,message,AssociatedOnlyClient())
+    assert status=='SUCESSO' and counting.classifications==1 and counting.analyses==1
+    ws=load_workbook(excel)['APÓLICES'];lot_col=next(c for c in range(1,ws.max_column+1) if ws.cell(1,c).value=='LOTE')
+    assert ws.cell(2,lot_col).value=='1'
+    group_row=next(row for row in control.rows() if (row.get('group_key') or '').startswith('PAIR-'))
+    assert group_row['lote']=='1' and group_row['status']=='SUCESSO'
+    email=control.find(message.message_id,message.uid)
+    metadata=json.loads((tmp_path/'history'/email['id_processamento']/'metadata.json').read_text())
+    item=metadata['lotes'][0]
+    assert item['lote']=='1' and item['lote_associado']=='1' and item['lote_documental'] is None
+    assert len(list((tmp_path/'docs').rglob('LOTE *')))==0
+
+
+def test_documentary_lot_conflict_with_associated_group_is_rejected(tmp_path):
+    message=make_message(tmp_path,['policy.pdf','bill.pdf'],'lot-conflict@example')
+    class ConflictingLotClient:
+        def classify(self,files,names):return {'grupos':[g('1','policy.pdf','bill.pdf')],'outros':[],'observacoes':None}
+        def analyze(self,policy,bill,expected_lot=None):
+            return raw_result(lote={'valor':'2','fonte':'APOLICE','confianca':.99})
+    status,control,excel,counting=run_process(tmp_path,message,ConflictingLotClient())
+    assert status=='ERRO' and counting.analyses==1
+    row=next(row for row in control.rows() if (row.get('group_key') or '').startswith('PAIR-'))
+    assert row['status']=='ERRO' and 'não confirma associação' in row['erro']
+    assert not (tmp_path/'docs').exists() and load_workbook(excel)['APÓLICES'].max_row==1

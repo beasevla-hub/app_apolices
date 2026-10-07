@@ -16,7 +16,7 @@ def data(**kw):
     base=dict(empresa="THI Engenharia",empresa_normalizada="THI",tipo_empresa="THI",orgao="Órgão X",orgao_normalizado="ORGAO X",numero_concorrencia_original="01/2026",numero_concorrencia_normalizado="01-2026",vigencia_data_inicial=date(2026,1,2),vigencia_data_final=date(2027,1,1),confianca_geral=.95)
     base.update(kw);return PolicyData(**base)
 def raw_result(**changes):
-    fields={"empresa":{"valor":"THI Engenharia","fonte":"APOLICE","confianca":.98},"empresa_normalizada":{"valor":"THI","fonte":"APOLICE","confianca":.99},"orgao":{"valor":"Órgão X","fonte":"APOLICE","confianca":.95},"orgao_normalizado":"ORGAO X","numero_concorrencia_original":{"valor":"01/2026","fonte":"APOLICE","confianca":.95},"numero_concorrencia_normalizado":{"valor":"01-2026","fonte":"APOLICE","confianca":.95},"processo_sei":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.1},"lote":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.1},"par_coerente":True,"objeto":{"valor":"Seguro","fonte":"APOLICE","confianca":.9},"vigencia_data_inicial":{"valor":"2026-01-02","fonte":"APOLICE","confianca":.98},"vigencia_data_final":{"valor":"2027-01-01","fonte":"APOLICE","confianca":.98},"valor_premio":{"valor":1234.56,"fonte":"APOLICE","confianca":.95},"numero_registro_susep":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.2},"linha_digitavel_boleto":{"valor":"12345","fonte":"BOLETO","confianca":.95},"tipo_empresa":"THI","nome_pasta":None,"nome_apolice":None,"nome_boleto":None,"confianca_geral":.95,"campos_com_duvida":["processo_sei","numero_registro_susep"],"observacoes":None}
+    fields={"empresa":{"valor":"THI ENGENHARIA E ARQUITETURA LTDA","fonte":"APOLICE","confianca":.98},"empresa_normalizada":{"valor":"THI","fonte":"APOLICE","confianca":.99},"cnpj":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.1},"orgao":{"valor":"Órgão X","fonte":"APOLICE","confianca":.95},"orgao_normalizado":"ORGAO X","numero_concorrencia_original":{"valor":"01/2026","fonte":"APOLICE","confianca":.95},"numero_concorrencia_normalizado":{"valor":"01-2026","fonte":"APOLICE","confianca":.95},"processo_sei":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.1},"lote":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.1},"par_coerente":True,"objeto":{"valor":"Seguro","fonte":"APOLICE","confianca":.9},"vigencia_data_inicial":{"valor":"2026-01-02","fonte":"APOLICE","confianca":.98},"vigencia_data_final":{"valor":"2027-01-01","fonte":"APOLICE","confianca":.98},"valor_premio":{"valor":1234.56,"fonte":"APOLICE","confianca":.95},"numero_registro_susep":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.2},"linha_digitavel_boleto":{"valor":"12345","fonte":"BOLETO","confianca":.95},"tipo_empresa":"THI","nome_pasta":None,"nome_apolice":None,"nome_boleto":None,"confianca_geral":.95,"campos_com_duvida":["processo_sei","numero_registro_susep"],"observacoes":None}
     fields.update(changes);return fields
 
 def make_pdf(path:Path):
@@ -124,6 +124,7 @@ def test_openrouter_sends_schema_and_parses_mocked_response(tmp_path,monkeypatch
     assert response['empresa_normalizada']['valor']=='THI'
     schema=calls['json']['response_format']['json_schema']['schema']
     assert schema['properties']['processo_sei']['properties']['fonte']['enum']==['APOLICE','BOLETO','AMBOS','NAO_IDENTIFICADO']
+    assert schema['properties']['cnpj']['properties']['valor']['type']==['string','null']
     assert calls['headers']['HTTP-Referer']=='https://github.com/beasevla-hub/app_apolices'
     assert 'manus.im' not in str(calls['headers']).lower()
     assert 'dummy-secret' not in str(calls['json'])
@@ -142,7 +143,7 @@ def test_openrouter_invalid_json_retries_limited(tmp_path,monkeypatch):
     assert count=={'calls':3,'sleeps':2}
 
 def test_phas_and_evidence_conflict_validation():
-    result=raw_result();result['empresa_normalizada']={'valor':'PHAS','fonte':'APOLICE','confianca':.99};result['tipo_empresa']='PHAS'
+    result=raw_result();result['empresa']={'valor':'PHAS ENGENHARIA, CONSTRUÇÕES E SERVIÇOS LTDA-ME','fonte':'APOLICE','confianca':.99};result['empresa_normalizada']={'valor':'PHAS ENGENHARIA CONSTRUCOES E SERVICOS LTDA ME','fonte':'APOLICE','confianca':.99};result['tipo_empresa']='PHAS'
     assert validate_policy(result).empresa_normalizada=='PHAS'
     result['tipo_empresa']='THI'
-    with pytest.raises(ValueError):validate_policy(result)
+    assert validate_policy(result).empresa_normalizada is None
