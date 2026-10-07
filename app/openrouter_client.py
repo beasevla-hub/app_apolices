@@ -2,14 +2,15 @@
 import base64, json, time
 from pathlib import Path
 import httpx
-from .prompt import POLICY_SCHEMA, ROLE_SCHEMA
+from .prompt import POLICY_SCHEMA, ROLE_SCHEMA, role_prompt, policy_prompt
 
 class OpenRouterError(RuntimeError): pass
 
 class OpenRouterClient:
-    def __init__(self, api_key: str, model: str, base_url: str, timeout: int = 120):
+    def __init__(self, api_key: str, model: str, base_url: str, timeout: int = 120, company_names: list[str] | None = None):
         if not api_key: raise ValueError("OPENROUTER_API_KEY não configurada")
         self.api_key, self.model, self.base_url, self.timeout = api_key, model, base_url.rstrip("/"), timeout
+        self.company_names=company_names or []
 
     def _request(self, prompt: str, files: list[Path], schema: dict) -> dict:
         content=[{"type":"text","text":prompt}]
@@ -25,7 +26,9 @@ class OpenRouterClient:
                 if response.status_code==429 or response.status_code>=500:
                     response.raise_for_status()
                 response.raise_for_status()
-                choices=response.json().get("choices",[])
+                try: payload=response.json()
+                except json.JSONDecodeError as exc: raise OpenRouterError("OpenRouter retornou corpo HTTP inválido") from exc
+                choices=payload.get("choices",[]) if isinstance(payload,dict) else []
                 text=choices[0].get("message",{}).get("content") if choices else None
                 if isinstance(text,list): text="".join(part.get("text","") for part in text)
                 if not text: raise OpenRouterError("Resposta vazia do OpenRouter")
@@ -38,7 +41,7 @@ class OpenRouterClient:
         raise OpenRouterError(f"Falha no OpenRouter após tentativas limitadas: {last}") from last
 
     def classify(self, files: list[Path], names: list[str]) -> dict:
-        return self._request("Classifique os documentos anexados. " + "; ".join(names), files, ROLE_SCHEMA)
+        return self._request(role_prompt(names), files, ROLE_SCHEMA)
 
     def analyze(self, policy: Path, bill: Path) -> dict:
-        return self._request("Extraia dados. O anexo 1 é a apólice (páginas iniciais); o anexo 2 é o boleto completo.\n"+__import__("app.prompt",fromlist=["policy_prompt"]).policy_prompt(), [policy,bill], POLICY_SCHEMA)
+        return self._request("Anexo 1 = páginas iniciais da APÓLICE; anexo 2 = BOLETO completo.\n"+policy_prompt(self.company_names), [policy,bill], POLICY_SCHEMA)

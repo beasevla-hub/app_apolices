@@ -27,6 +27,7 @@ class Settings:
     dry_run: bool = os.getenv("DRY_RUN", "false").lower() in {"1", "true", "yes"}
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     max_emails_per_run: int = int(os.getenv("MAX_EMAILS_PER_RUN", "100"))
+    robot_max_attempts: int = int(os.getenv("ROBOT_MAX_ATTEMPTS", "5"))
     keep_success_temp: bool = os.getenv("KEEP_SUCCESS_TEMP", "false").lower() in {"1", "true", "yes"}
 
 settings = Settings()

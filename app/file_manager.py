@@ -1,6 +1,5 @@
-"""Criação conservadora de pastas e publicação dos documentos."""
+"""Geração determinística e publicação conservadora dos documentos."""
 from pathlib import Path
-from datetime import date
 import os,re,shutil,hashlib
 from .models import PolicyData
 INVALID=re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -9,20 +8,25 @@ def sanitize_filename(name:str)->str:
     return value[:180] or "documento.pdf"
 def sha256(path:Path)->str:
     digest=hashlib.sha256()
-    with path.open("rb") as f:
+    with Path(path).open("rb") as f:
         for chunk in iter(lambda:f.read(1024*1024),b""):digest.update(chunk)
     return digest.hexdigest()
-def publish(root:Path,data:PolicyData,policy:Path,bill:Path,return_created:bool=False):
+def build_document_names(data:PolicyData)->tuple[str,str]:
+    org=sanitize_filename(data.orgao_normalizado or data.orgao or "ORGAO")
+    number=sanitize_filename(data.numero_concorrencia_normalizado or "CONCORRENCIA-NAO-INFORMADA")
+    base=sanitize_filename(f"{org} - {number}")
+    return f"01. APOLICE - {base}.pdf",f"08. BOLETO - {base}.pdf"
+def build_destination(root:Path,data:PolicyData)->Path:
     if not data.minimum_data_present():raise ValueError("Dados mínimos ausentes; documentos não publicados")
+    if data.empresa_normalizada not in {"THI","PHAS"}:raise ValueError("empresa_normalizada não identificada")
     folder_date=data.vigencia_data_inicial.strftime("%d.%m.%Y")
     org=sanitize_filename(data.orgao_normalizado or data.orgao or "ORGAO")
     number=sanitize_filename(data.numero_concorrencia_normalizado or "")
-    base=sanitize_filename(f"{org} - {number}")
-    destination=Path(root)/data.tipo_empresa/folder_date/base
-    destination.mkdir(parents=True,exist_ok=True)
-    policy_name=sanitize_filename(data.nome_apolice or f"01. APOLICE - {base}.pdf")
-    bill_name=sanitize_filename(data.nome_boleto or f"08. BOLETO - {base}.pdf")
-    pairs=[(policy,destination/policy_name),(bill,destination/bill_name)];created=[]
+    return Path(root)/data.empresa_normalizada/folder_date/sanitize_filename(f"{org} - {number}")
+def publish(root:Path,data:PolicyData,policy:Path,bill:Path,return_created:bool=False):
+    destination=build_destination(root,data);destination.mkdir(parents=True,exist_ok=True)
+    policy_name,bill_name=build_document_names(data)
+    pairs=[(Path(policy),destination/policy_name),(Path(bill),destination/bill_name)];created=[]
     try:
         for src,dst in pairs:
             if dst.exists() and sha256(dst)==sha256(src):continue
