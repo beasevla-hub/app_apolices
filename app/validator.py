@@ -25,3 +25,7 @@ def require_minimum(data:PolicyData)->None:
     if missing:raise ValueError("Evidência documental ausente nos campos obrigatórios: "+", ".join(missing))
     low=[name for name in required if data.confidence_for(name)<REQUIRED_CONFIDENCE]
     if low:raise ValueError("Confiança insuficiente para publicação nos campos: "+", ".join(low))
+    if data.lote is not None:
+        if "lote" not in data.evidencias:raise ValueError("Lote identificado sem evidência documental")
+        if data.confidence_for("lote")<REQUIRED_CONFIDENCE:raise ValueError("Confiança insuficiente para o lote identificado")
+    if data.par_coerente is not True:raise ValueError("Apólice e boleto não tiveram coerência confirmada; revisão manual")
