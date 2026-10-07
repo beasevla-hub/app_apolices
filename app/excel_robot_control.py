@@ -42,7 +42,8 @@ class RobotControl:
         return not row or row.get("status")!="SUCESSO" and int(row.get("tentativas") or 0)<self.max_attempts
     def begin(self,**data)->str:
         process_id=data.get("id_processamento") or uuid4().hex[:12].upper()
-        data["status"]="PROCESSANDO";data["id_processamento"]=process_id;data["increment_attempt"]=True
+        data["status"]="PROCESSANDO";data["erro"]=None;data["pasta_destino"]=None
+        data["id_processamento"]=process_id;data["increment_attempt"]=True
         self.record(**data)
         return process_id
     def record(self,**data):
@@ -56,6 +57,7 @@ class RobotControl:
         if data.get("increment_attempt"):values["tentativas"]=old_attempt+1
         elif "tentativas" not in values and old_attempt:values["tentativas"]=old_attempt
         values.setdefault("data_ultima_tentativa",datetime.now().isoformat(timespec="seconds"))
+        if values.get("status") in {"PROCESSANDO","SUCESSO"}:values["erro"]=None
         if values.get("status")=="SUCESSO":values["data_processamento"]=datetime.now().isoformat(timespec="seconds")
         for key,value in values.items():
             if key in headers:ws.cell(row_num,headers[key]).value=value

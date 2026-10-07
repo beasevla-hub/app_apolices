@@ -47,10 +47,14 @@ def test_robot_control_status_attempts_retry_and_headers(tmp_path):
     assert ctl.can_retry('m1','1')
     pid=ctl.begin(message_id='m1',uid='1',status='PROCESSANDO',modelo_ia='mock/model')
     assert pid and ctl.attempts('m1','1')==1 and ctl.find('m1')['status']=='PROCESSANDO'
-    ctl.record(message_id='m1',uid='1',status='ERRO',erro='fail')
+    ctl.record(message_id='m1',uid='1',status='ERRO',erro='fail',pasta_destino='old-path')
     assert ctl.can_retry('m1','1')
-    ctl.begin(message_id='m1',uid='1');ctl.record(message_id='m1',uid='1',status='ERRO')
+    ctl.begin(message_id='m1',uid='1')
+    assert ctl.find('m1')['erro'] is None and ctl.find('m1')['pasta_destino'] is None
+    ctl.record(message_id='m1',uid='1',status='ERRO',erro='new failure')
     assert not ctl.can_retry('m1','1')
+    ctl.record(message_id='m1',uid='1',status='SUCESSO',erro='stale')
+    assert ctl.find('m1')['erro'] is None
     assert len(ctl.rows()[0])>=len(HEADERS)
 def test_robot_control_duplicate_documents_require_pair_on_same_row(tmp_path):
     ctl=RobotControl(tmp_path/'r.xlsx');ctl.record(message_id='m1',uid='1',status='SUCESSO',hash_apolice='a',hash_boleto='b')
@@ -58,7 +62,7 @@ def test_robot_control_duplicate_documents_require_pair_on_same_row(tmp_path):
     assert not ctl.already_processed('',{'a','other'})
 def test_excel_manual_null_backup_and_explicit_sheet(tmp_path):
     path=tmp_path/'ops.xlsx';wb=Workbook();ws=wb.active;ws.title='APÓLICES';ws.append(ROBOT_MANAGED_COLUMNS+['STATUS','RESPONSÁVEL'])
-    ws.append(['Órgão X','THI Engenharia','01/2026',None,None,None,None,None,None,None,'PAGO','BEA']);wb.save(path)
+    ws.append(['Órgão X','THI Engenharia','01/2026','SEI-1',None,None,None,None,None,None,'PAGO','BEA']);wb.save(path)
     update_workbook(path,data(processo_sei='SEI-1'),tmp_path/'backups')
     ws=load_workbook(path)['APÓLICES'];assert ws.cell(2,11).value=='PAGO' and ws.cell(2,12).value=='BEA'
     assert ws.cell(2,4).value=='SEI-1' and len(list((tmp_path/'backups').glob('*.xlsx')))==1
@@ -70,6 +74,13 @@ def test_excel_missing_named_sheet_and_ambiguous_rows_do_not_write(tmp_path):
     path2=tmp_path/'dup.xlsx';wb=Workbook();ws=wb.active;ws.title='APÓLICES';ws.append(ROBOT_MANAGED_COLUMNS)
     row=['Órgão X','THI Engenharia','01/2026',None,None,None,None,None,None,None];ws.append(row);ws.append(row);wb.save(path2)
     with pytest.raises(ValueError,match='POSSIVEL_DUPLICATA'):update_workbook(path2,data(),tmp_path/'backups')
+
+def test_excel_different_sei_is_a_distinct_record_even_if_org_and_number_match(tmp_path):
+    path=tmp_path/'sei.xlsx';wb=Workbook();ws=wb.active;ws.title='APÓLICES';ws.append(ROBOT_MANAGED_COLUMNS)
+    ws.append(['Órgão X','THI Engenharia','01/2026','SEI-123',None,None,None,None,None,None]);wb.save(path)
+    result=update_workbook(path,data(processo_sei='SEI-999'),tmp_path/'backups')
+    ws=load_workbook(path)['APÓLICES']
+    assert result=='ADICIONADO' and ws.max_row==3 and ws['D2'].value=='SEI-123' and ws['D3'].value=='SEI-999'
 def test_excel_new_record_and_manual_columns(tmp_path):
     path=tmp_path/'new.xlsx';assert update_workbook(path,data(),tmp_path/'backups')=='ADICIONADO'
     ws=load_workbook(path)['APÓLICES'];assert ws.max_row==2 and ws['B2'].value=='THI Engenharia'
@@ -113,6 +124,8 @@ def test_openrouter_sends_schema_and_parses_mocked_response(tmp_path,monkeypatch
     assert response['empresa_normalizada']['valor']=='THI'
     schema=calls['json']['response_format']['json_schema']['schema']
     assert schema['properties']['processo_sei']['properties']['fonte']['enum']==['APOLICE','BOLETO','AMBOS','NAO_IDENTIFICADO']
+    assert calls['headers']['HTTP-Referer']=='https://github.com/beasevla-hub/app_apolices'
+    assert 'manus.im' not in str(calls['headers']).lower()
     assert 'dummy-secret' not in str(calls['json'])
 
 def test_openrouter_invalid_json_retries_limited(tmp_path,monkeypatch):

@@ -21,7 +21,7 @@ class OpenRouterClient:
         last=None
         for attempt in range(3):
             try:
-                response=httpx.post(self.base_url+"/chat/completions",headers={"Authorization":"Bearer "+self.api_key,"Content-Type":"application/json","HTTP-Referer":"https://manus.im","X-Title":"Robo local de apolices"},json=body,timeout=self.timeout)
+                response=httpx.post(self.base_url+"/chat/completions",headers={"Authorization":"Bearer "+self.api_key,"Content-Type":"application/json","HTTP-Referer":"https://github.com/beasevla-hub/app_apolices","X-Title":"Robo local de apolices THI PHAS"},json=body,timeout=self.timeout)
                 if response.status_code in (400,401,402): raise OpenRouterError(f"OpenRouter HTTP {response.status_code}: {response.text[:500]}")
                 if response.status_code==429 or response.status_code>=500:
                     response.raise_for_status()
