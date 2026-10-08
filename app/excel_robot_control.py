@@ -1,14 +1,11 @@
-"""Planilha técnica de idempotência, retries e estado por e-mail/par documental."""
+"""Planilha técnica de auditoria e idempotência por par documental."""
 from pathlib import Path
-from datetime import datetime,timedelta,timezone
+from datetime import datetime
 from uuid import uuid4
-from functools import lru_cache
-import logging
 import os
 from openpyxl import Workbook,load_workbook
 from openpyxl.styles import Font,PatternFill
 HEADERS=["message_id","uid","group_key","lote","data_email","remetente","assunto","hash_apolice","hash_boleto","status","tentativas","modelo_ia","data_ultima_tentativa","data_processamento","erro","pasta_destino","id_processamento"]
-log=logging.getLogger(__name__)
 class RobotControl:
     def __init__(self,path:Path,max_attempts:int=5):self.path=Path(path);self.max_attempts=max_attempts
     def _open(self):
@@ -33,72 +30,18 @@ class RobotControl:
     def _group_matches(row,group_key):return (row.get("group_key") or "")== (group_key or "")
     def find(self,message_id:str,uid:str="",group_key:str|None=None):
         return next((row for row in self.rows() if ((message_id and row.get("message_id")==message_id) or (uid and str(row.get("uid"))==str(uid))) and self._group_matches(row,group_key)),None)
-    def already_processed(self,message_id:str,hashes:set[str],lot:str|None=None)->bool:
-        def same_documents(row):
-            stored={row.get("hash_apolice"),row.get("hash_boleto")}-{None,""}
-            def normalized(value):
-                text=" ".join(str(value or "").casefold().split())
-                return (text[5:].strip() if text.startswith("lote ") else text) or None
-            stored_lot=normalized(row.get("lote"));requested_lot=normalized(lot)
-            return bool(hashes) and hashes.issubset(stored) and (requested_lot is None or stored_lot==requested_lot)
-        return any(row.get("status")=="SUCESSO" and ((message_id and row.get("message_id")==message_id) or same_documents(row)) for row in self.rows())
-    def all_attachments_processed(self,hashes:list[str])->bool:
-        """True apenas se todos os PDFs formarem pares exatos já concluídos, sem anexos extra."""
-        if not hashes or len(hashes)%2:return False
-        known={}
-        for row in self.rows():
-            if row.get("status")!="SUCESSO" or not row.get("hash_apolice") or not row.get("hash_boleto"):continue
-            pair=tuple(sorted((str(row["hash_apolice"]),str(row["hash_boleto"]))))
-            known[pair]=known.get(pair,0)+1
-        if not known:return False
-        counts={}
-        for digest in hashes:counts[str(digest)]=counts.get(str(digest),0)+1
-        def state(counter):return tuple(sorted((key,value) for key,value in counter.items() if value>0))
-        @lru_cache(maxsize=None)
-        def match(count_state,pair_state):
-            if not count_state:return True
-            digest,amount=count_state[0];remaining=dict(count_state);remaining[digest]-=1
-            if not remaining[digest]:del remaining[digest]
-            edges=dict(pair_state)
-            for other,available in list(remaining.items()):
-                if available<=0:continue
-                pair=tuple(sorted((digest,other)))
-                if edges.get(pair,0)<=0:continue
-                next_counts=dict(remaining);next_counts[other]-=1
-                if next_counts[other]<=0:del next_counts[other]
-                next_edges=dict(edges);next_edges[pair]-=1
-                if match(state(next_counts),state(next_edges)):return True
-            return False
-        return match(state(counts),state(known))
+    def completed_pair(self,message_id:str,group_key:str,policy_hash:str,bill_hash:str,lot:str|None=None):
+        """Retorna somente SUCESSO com os dois hashes exatos; status/tentativas não são gates."""
+        completed=[row for row in self.rows() if row.get("status")=="SUCESSO" and row.get("hash_apolice")==policy_hash and row.get("hash_boleto")==bill_hash]
+        def normalize(value):
+            text=" ".join(str(value or "").casefold().split())
+            return (text[5:].strip() if text.startswith("lote ") else text) or None
+        requested=normalize(lot)
+        compatible=[row for row in completed if requested is None or normalize(row.get("lote"))==requested]
+        exact=next((row for row in compatible if row.get("message_id")==message_id and (row.get("group_key") or "")==group_key),None)
+        return exact or next(iter(compatible),None)
     def attempts(self,message_id:str,uid:str="",group_key:str|None=None)->int:
         record=self.find(message_id,uid,group_key);return int(record.get("tentativas") or 0) if record else 0
-    @staticmethod
-    def _processing_is_stale(value,stale_processing_minutes:int)->bool:
-        try:
-            minutes=int(stale_processing_minutes)
-            if minutes<0:raise ValueError("limite de minutos negativo")
-            if isinstance(value,datetime):last_attempt=value
-            else:
-                text=str(value or "").strip()
-                if not text or ("T" not in text and " " not in text):raise ValueError("timestamp ausente ou sem componente de hora")
-                last_attempt=datetime.fromisoformat(text.replace("Z","+00:00"))
-            # astimezone(UTC) interpreta valores naive no fuso local do computador,
-            # compatível com os registros antigos criados por datetime.now().
-            last_attempt_utc=last_attempt.astimezone(timezone.utc)
-            return datetime.now(timezone.utc)-last_attempt_utc>timedelta(minutes=minutes)
-        except (TypeError,ValueError,OverflowError) as exc:
-            log.warning("Registro PROCESSANDO não será retomado: data_ultima_tentativa ausente/inválida ou política inválida (%s)",exc)
-            return False
-    def can_retry(self,message_id:str,uid:str="",group_key:str|None=None,force_retry_error:bool=False,stale_processing_minutes:int=30)->bool:
-        row=self.find(message_id,uid,group_key)
-        if not row:return True
-        status=row.get("status")
-        if status=="SUCESSO":return False
-        if force_retry_error and status=="IGNORADO":return False
-        if force_retry_error and status=="ERRO":return True
-        if force_retry_error and status=="PROCESSANDO":
-            return self._processing_is_stale(row.get("data_ultima_tentativa"),stale_processing_minutes)
-        return int(row.get("tentativas") or 0)<self.max_attempts
     def begin(self,**data)->str:
         process_id=data.get("id_processamento") or uuid4().hex[:12].upper()
         data.update(status="PROCESSANDO",erro=None,pasta_destino=None,id_processamento=process_id,increment_attempt=True)

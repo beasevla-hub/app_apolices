@@ -2,16 +2,16 @@
 
 Aplicativo local para Windows que consulta a Locaweb por IMAP SSL, classifica PDFs de e-mails da Finlândia Seguros, extrai dados com OpenRouter multimodal e organiza documentos, planilhas e histórico de execução.
 
-> O repositório não contém credenciais. O smoke test e os testes automatizados usam dados e serviços mockados. Recomenda-se fazer um backfill com `--dry-run` antes de publicar documentos reais.
+> O repositório não contém credenciais. `--test` e os testes automatizados são offline/mockados. `--dry-run` não é um teste offline: ele ainda chama o OpenRouter e consome créditos.
 
 ## Instalação e configuração
 
 1. Instale Python 3.12+.
 2. Clone/extraia o repositório e execute `instalar.bat`.
 3. Preencha `.env` com `EMAIL_USER`, `EMAIL_PASSWORD`, `OPENROUTER_API_KEY`, caminhos e domínios/remetentes permitidos. `.env` não é versionado.
-4. Execute o smoke test offline, depois um backfill com `--dry-run` para o período desejado.
+4. Valide com `python -m app.main --test` e `python -m pytest -q`; depois execute o backfill real para o período desejado.
 
-`OPENROUTER_MODEL` continua configurável. O modelo escolhido precisa aceitar PDFs e JSON Schema estrito. `THI_NAMES`/`PHAS_NAMES` definem nomes jurídicos reconhecidos; `THI_CNPJ`/`PHAS_CNPJ` configuram CNPJs para desempate determinístico (o exemplo já traz o CNPJ THI informado). `MAX_EMAILS_PER_RUN` limita a busca diária; `ROBOT_MAX_ATTEMPTS` define o limite de tentativas por e-mail e por grupo documental (padrão 5); `ROBOT_STALE_PROCESSING_MINUTES` define após quantos minutos um registro `PROCESSANDO` pode ser recuperado por `--retry-errors` (padrão 30).
+`OPENROUTER_MODEL` continua configurável. O modelo escolhido precisa aceitar PDFs e JSON Schema estrito. `THI_NAMES`/`PHAS_NAMES` definem nomes jurídicos reconhecidos; `THI_CNPJ`/`PHAS_CNPJ` configuram CNPJs para desempate determinístico (o exemplo já traz o CNPJ THI informado). `MAX_EMAILS_PER_RUN` limita a busca diária. `ROBOT_MAX_ATTEMPTS` permanece apenas por compatibilidade/auditoria: tentativas não bloqueiam processamento.
 
 ## Comandos
 
@@ -22,26 +22,24 @@ python -m app.main --test
 python -m pytest -q
 ```
 
-### Execução diária normal ou dry-run
+### Execução diária normal ou análise sem publicação (opcional)
 
 ```powershell
 python -m app.main
 python -m app.main --dry-run
 ```
 
-O dry-run conecta ao IMAP/OpenRouter e processa a classificação e as análises, mas não publica PDFs nem altera o Excel operacional. Ele salva `resultado.json` e `metadata.json` e registra `IGNORADO` com nota `DRY_RUN` no controle técnico.
+O modo normal busca e-mails novos/relevantes. A conclusão é decidida por par: um par `SUCESSO` com os mesmos hashes é ignorado; qualquer par ainda não concluído pode ser tentado novamente. O contador não bloqueia a execução. `--dry-run` conecta ao IMAP/OpenRouter e faz classificação/análises, mas não publica PDFs nem altera o Excel; portanto **consome chamadas/créditos** e não deve ser usado como teste offline nem como execução do backlog.
 
 ### Backfill histórico
 
 ```powershell
-python -m app.main --backfill --inicio 01/08/2026 --fim 30/09/2026
-python -m app.main --backfill --inicio 01/08/2026 --fim 30/09/2026 --dry-run
-python -m app.main --backfill --inicio 21/09/2026 --fim 07/10/2026 --retry-errors
+python -m app.main --backfill --inicio 21/09/2026 --fim 07/10/2026
 ```
 
 Datas usam `DD/MM/AAAA`; ambas as extremidades são inclusivas. A busca IMAP usa `SINCE início` e `BEFORE (fim + 1 dia)`, inclui e-mails lidos, filtra os domínios permitidos e não aplica `UNSEEN` nem `MAX_EMAILS_PER_RUN`. A data inválida ou invertida é rejeitada antes de conectar.
 
-`--retry-errors` só pode ser combinado com `--backfill`. É uma opção explícita para reprocessar registros com status `ERRO` após correções do robô, mesmo quando já atingiram `ROBOT_MAX_ATTEMPTS`. Também permite retomar `PROCESSANDO` somente quando `data_ultima_tentativa` indicar que está parado há mais de `ROBOT_STALE_PROCESSING_MINUTES` (30 min por padrão); timestamp ausente/inválido é bloqueado por segurança. Um processamento recente não é interrompido. Não apaga histórico nem altera artificialmente o contador: cada nova tentativa o incrementa e recebe novo `id_processamento`. Registros `SUCESSO` continuam ignorados e `IGNORADO` não é convertido em erro nem reprocessado por essa opção. Em e-mails multilote, o override é aplicado por `group_key`: grupos `SUCESSO` são pulados e somente `ERRO` ou `PROCESSANDO` stale podem ser retomados. A classificação existente é reutilizada quando os hashes dos PDFs coincidem; não há nova chamada de classificação nesse caso. Sem `--retry-errors`, o limite normal permanece inalterado.
+No backfill, status geral do e-mail, estado antigo do grupo e contador de tentativas **nunca bloqueiam**. Cada e-mail é classificado uma vez (salvo cache local); depois de identificar os pares, o único skip é um par já concluído: status `SUCESSO` com os mesmos hashes posicionais de apólice e boleto (e lote compatível quando necessário). `ERRO`, `PROCESSANDO`, `IGNORADO`, estados desconhecidos e tentativas altas são retomados. Em mensagens multilote, cada grupo é decidido independentemente: sucessos são pulados, os demais analisados. `--retry-errors` pode ser omitido; se fornecido com `--backfill`, é apenas um alias compatível, sem lógica própria. Backfill é sempre execução real e não aceita `--dry-run` nem `DRY_RUN=true`.
 
 Uma falha em um grupo ou e-mail não interrompe os demais. Em perda de transporte IMAP, o cliente fecha o socket quebrado, reconecta com espera limitada de 2/4/8 segundos, seleciona novamente a pasta e repete o UID atual. Se os retries se esgotarem, o lote para com **resumo parcial explícito**; sucessos já persistidos continuam registrados e podem ser retomados sem reanálise.
 
@@ -55,7 +53,7 @@ Depois, é feita **uma análise multimodal independente por par** (três primeir
 
 Com apenas um grupo, a estrutura de pastas e os nomes anteriores são preservados. Com vários grupos, cada par recebe uma subpasta de lote e os nomes dos dois PDFs recebem o mesmo sufixo (`LOTE 01`, por exemplo), usando o lote associado mesmo quando a apólice não o imprime. Se nem a classificação nem a análise identificarem lote, usa-se um rótulo neutro como `GRUPO 01`; o identificador nunca é inventado. Os nomes e caminhos são construídos pelo Python, não pela IA. Arquivos `OUTRO` não são publicados como apólice/boleto.
 
-A classificação e seu mapa de hashes são armazenados localmente para uma retomada do mesmo e-mail. O controle grava estado, tentativas, hashes, lote e destino **separadamente para cada par**. Checkpoints de `PROCESSANDO` por grupo e chamadas/cache também ficam no metadata. Na retomada, grupos já concluídos não voltam a consumir análise; grupos com erro são reprocessados até o limite configurado. Uma eventual diferença de conteúdo em um destino existente causa conflito, sem sobrescrita silenciosa.
+A classificação e seu mapa de hashes são armazenados localmente para retomada do mesmo e-mail. O controle grava estado, tentativas, hashes, lote e destino **separadamente para cada par**; as tentativas são auditoria, não uma barreira. Na retomada, grupos já concluídos não voltam a consumir análise; qualquer grupo sem sucesso pode ser processado, inclusive um estado `PROCESSANDO` deixado por encerramento abrupto. Uma eventual diferença de conteúdo em um destino existente causa conflito, sem sobrescrita silenciosa.
 
 ## Dados, planilhas e histórico
 
@@ -73,7 +71,7 @@ data/historico/<id_processamento>/resultado.json
 data/historico/<id_processamento>/metadata.json
 ```
 
-O metadata registra modo (`NORMAL`, `DRY_RUN`, `BACKFILL` ou `BACKFILL_DRY_RUN`), message-id/UID, remetente, assunto, modelo, quantidade de PDFs/grupos, lotes, hashes/estados por grupo, issues e timestamp UTC. Respostas de cada par ficam em `lotes/<group_key>/resultado.json`. O mapa reutilizável de classificação fica em `data/historico/classificacoes/`. Dados operacionais, histórico, logs, backups e `.env` são locais e ignorados pelo Git.
+O metadata registra modo (`NORMAL`, `DRY_RUN` ou `BACKFILL`), message-id/UID, remetente, assunto, modelo, quantidade de PDFs/grupos, lotes, hashes/estados por grupo, issues e timestamp UTC. Respostas de cada par ficam em `lotes/<group_key>/resultado.json`. O mapa reutilizável de classificação fica em `data/historico/classificacoes/`. Dados operacionais, histórico, logs, backups e `.env` são locais e ignorados pelo Git.
 
 ## Agendamento Windows
 
@@ -84,10 +82,9 @@ O Task Scheduler é configurado pelos scripts para 06:00 e 21:00. Revise identid
 ```powershell
 python -m app.main --test
 python -m pytest -q
-python -m app.main --backfill --inicio 01/08/2026 --fim 30/09/2026 --dry-run
 ```
 
-Revise resultados, logs e issues do dry-run antes do backfill real. Este ambiente valida localmente com mocks; não acessa IMAP nem OpenRouter reais.
+Os dois primeiros comandos são offline e usam validação/mocks; não acessam IMAP nem OpenRouter reais. O comando `python -m app.main --backfill --inicio DD/MM/AAAA --fim DD/MM/AAAA` é execução real: conecta ao IMAP, chama OpenRouter para classificação e para cada grupo ainda não concluído, publica PDFs e atualiza o Excel. Não use `--dry-run` para validar o backlog.
 
 ## Troubleshooting
 

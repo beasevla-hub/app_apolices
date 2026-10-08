@@ -73,6 +73,7 @@ def test_cli_rejects_invalid_or_reversed_dates_before_io(monkeypatch):
         ['app.main','--backfill','--inicio','31/02/2026','--fim','30/09/2026'],
         ['app.main','--backfill','--inicio','30/09/2026','--fim','01/08/2026'],
         ['app.main','--backfill','--inicio','01/08/2026'],
+        ['app.main','--backfill','--inicio','21/09/2026','--fim','07/10/2026','--dry-run'],
     ]:
         monkeypatch.setattr(sys,'argv',args)
         with pytest.raises(SystemExit) as error:main()
@@ -116,7 +117,7 @@ def test_imap_reconnect_failure_is_bounded_and_transport_not_document_error(monk
     assert attempts['count']==2
 
 
-def test_retry_errors_cli_requires_backfill_and_passes_flag(monkeypatch):
+def test_backfill_cli_does_not_require_retry_errors_and_alias_is_optional(monkeypatch):
     import sys
     import app.main as main_module
     with pytest.raises(SystemExit) as error:
@@ -125,6 +126,18 @@ def test_retry_errors_cli_requires_backfill_and_passes_flag(monkeypatch):
     assert error.value.code==2
     calls={}
     monkeypatch.setattr(main_module,'run',lambda dry_run,period,retry_errors=False:calls.update(dry_run=dry_run,period=period,retry_errors=retry_errors) or 0)
+    monkeypatch.setattr(sys,'argv',['app.main','--backfill','--inicio','21/09/2026','--fim','07/10/2026'])
+    assert main_module.main()==0
+    assert calls=={'dry_run':False,'period':(date(2026,9,21),date(2026,10,7)),'retry_errors':False}
+    calls.clear()
     monkeypatch.setattr(sys,'argv',['app.main','--backfill','--inicio','21/09/2026','--fim','07/10/2026','--retry-errors'])
     assert main_module.main()==0
     assert calls=={'dry_run':False,'period':(date(2026,9,21),date(2026,10,7)),'retry_errors':True}
+
+
+def test_backfill_refuses_dry_run_environment(monkeypatch):
+    from dataclasses import replace
+    import app.main as main_module
+    monkeypatch.setattr(main_module,'settings',replace(main_module.settings,dry_run=True))
+    with pytest.raises(ValueError,match='BACKFILL é execução real'):
+        main_module.run(backfill_period=(date(2026,9,21),date(2026,10,7)))

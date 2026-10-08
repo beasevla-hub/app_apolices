@@ -1,21 +1,22 @@
 import json
 from email.message import EmailMessage
 from pathlib import Path
+import pytest
 from openpyxl import Workbook,load_workbook
 from pypdf import PdfWriter
-from app.email_client import MailMessage
+from app.email_client import MailMessage,EmailClient
 from app.excel_apolices import ROBOT_MANAGED_COLUMNS
 from app.excel_robot_control import RobotControl
 from app.main import process_message,CountingOpenRouter
 from tests.test_core import raw_result
 
-def pdf_bytes():
-    writer=PdfWriter();writer.add_blank_page(width=200,height=200)
+def pdf_bytes(width=200,height=200):
+    writer=PdfWriter();writer.add_blank_page(width=width,height=height)
     import io
     buffer=io.BytesIO();writer.write(buffer);return buffer.getvalue()
-def make_message(tmp_path,filenames,message_id='multi@example'):
+def make_message(tmp_path,filenames,message_id='multi@example',payload=None):
     em=EmailMessage();em['From']='arquivo@finlandiaseguros.com.br';em['To']='robot@example.com';em['Subject']='Apólices de lotes';em['Message-ID']=f'<{message_id}>';em.set_content('Documentos para diversos lotes')
-    payload=pdf_bytes()
+    payload=payload or pdf_bytes()
     for name in filenames:em.add_attachment(payload,maintype='application',subtype='pdf',filename=name)
     return MailMessage('445',f'<{message_id}>','arquivo@finlandiaseguros.com.br',em['Subject'],'2026-09-25',em.as_bytes())
 def setup_excel(path):
@@ -35,7 +36,7 @@ def run_process(tmp_path,message,client):
     status=process_message(message,control,counting,root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history')
     return status,control,excel,counting
 
-def test_two_lots_random_order_other_file_and_retry_only_failed_group(tmp_path):
+def test_two_lots_random_order_other_file_and_resume_only_failed_group_without_flag(tmp_path):
     names=['policy_02.pdf','bill_01.pdf','extra.pdf','policy_01.pdf','bill_02.pdf']
     message=make_message(tmp_path,names,'retry@example')
     client=GroupClient([g('01','policy_01.pdf','bill_01.pdf'),g('02','policy_02.pdf','bill_02.pdf')],fail_once='02')
@@ -53,17 +54,17 @@ def test_two_lots_random_order_other_file_and_retry_only_failed_group(tmp_path):
     email_row=control.find(message.message_id,message.uid)
     metadata=json.loads((tmp_path/'history'/email_row['id_processamento']/'metadata.json').read_text())
     assert metadata['quantidade_pdfs']==5 and metadata['quantidade_grupos']==2
+    assert len(metadata['pdfs'])==5 and all(len(item['sha256'])==64 for item in metadata['pdfs'])
     assert all(entry['status']=='SUCESSO' for entry in metadata['lotes'])
     assert metadata['classificacao_cache_reutilizada'] is True
     assert metadata['chamadas_openrouter']=={'classificacao':0,'analises':1,'total':1}
-    # Mesmo conteúdo em uma nova mensagem, quando todos os PDFs formam pares completos já concluídos,
-    # é ignorado antes da classificação (sem custo adicional).
+    # E-mail distinto classifica uma vez; hashes exatos dos pares concluídos evitam novas análises.
     copied=make_message(tmp_path,['policy_01.pdf','bill_01.pdf','policy_02.pdf','bill_02.pdf'],'copy@example')
     calls=(counting.classifications,counting.analyses)
-    assert process_message(copied,control,counting,root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history')=='IGNORADO'
-    assert (counting.classifications,counting.analyses)==calls
-    assert process_message(message,control,counting,root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history')=='IGNORADO'
-    assert (counting.classifications,counting.analyses)==calls
+    assert process_message(copied,control,counting,root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history')=='SUCESSO'
+    assert (counting.classifications,counting.analyses)==(calls[0]+1,calls[1])
+    assert process_message(message,control,counting,root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history')=='SUCESSO'
+    assert (counting.classifications,counting.analyses)==(calls[0]+1,calls[1])
 
 def test_ten_groups_make_ten_separate_analyses(tmp_path):
     names=[f'{kind}_{idx:02d}.pdf' for idx in range(1,11) for kind in ('apolice','boleto')]
@@ -131,7 +132,7 @@ def test_documentary_lot_conflict_with_associated_group_is_rejected(tmp_path):
     assert not (tmp_path/'docs').exists() and load_workbook(excel)['APÓLICES'].max_row==1
 
 
-def test_retry_errors_reuses_classification_and_reanalyzes_only_failed_group(tmp_path):
+def test_backfill_reuses_classification_and_reanalyzes_only_failed_group_without_flag(tmp_path):
     names=[f'{kind}_{idx:02d}.pdf' for idx in range(1,4) for kind in ('policy','bill')]
     message=make_message(tmp_path,names,'retry-errors-groups@example')
     groups=[g('01','policy_01.pdf','bill_01.pdf'),g('02','policy_02.pdf','bill_02.pdf'),g('03','policy_03.pdf','bill_03.pdf')]
@@ -144,7 +145,7 @@ def test_retry_errors_reuses_classification_and_reanalyzes_only_failed_group(tmp
     assert sorted(row['status'] for row in rows)==['ERRO','SUCESSO','SUCESSO']
     attempts_before={row['group_key']:row['tentativas'] for row in rows}
     assert max(attempts_before.values())==1
-    assert process_message(message,control,counting,retry_errors=True,**kwargs)=='SUCESSO'
+    assert process_message(message,control,counting,**kwargs)=='SUCESSO'
     # A classificação vem do cache e apenas o grupo 02 recebe uma nova análise.
     assert counting.classifications==1 and counting.analyses==4
     rows=[row for row in control.rows() if (row.get('group_key') or '').startswith('PAIR-')]
@@ -152,8 +153,8 @@ def test_retry_errors_reuses_classification_and_reanalyzes_only_failed_group(tmp
     assert sorted(row['tentativas'] for row in rows)==[1,1,2]
 
 
-def test_retry_errors_recovers_stale_email_and_only_stale_group(tmp_path):
-    from datetime import datetime,timedelta
+def test_backfill_retries_recent_processing_and_hundred_attempts_by_group(tmp_path):
+    from datetime import datetime
     names=[f'{kind}_{idx:02d}.pdf' for idx in range(1,4) for kind in ('policy','bill')]
     message=make_message(tmp_path,names,'stale-processing-groups@example')
     groups=[g('01','policy_01.pdf','bill_01.pdf'),g('02','policy_02.pdf','bill_02.pdf'),g('03','policy_03.pdf','bill_03.pdf')]
@@ -165,13 +166,13 @@ def test_retry_errors_recovers_stale_email_and_only_stale_group(tmp_path):
     failed=next(row for row in rows if row['lote']=='02');successes={row['lote']:row for row in rows if row['status']=='SUCESSO'}
     parent=control.find(message.message_id,message.uid)
     old_group_process=failed['id_processamento'];old_parent_process=parent['id_processamento']
-    stale_time=(datetime.now()-timedelta(hours=2)).isoformat(timespec='seconds')
-    control.record(message_id=message.message_id,uid=message.uid,status='PROCESSANDO',data_ultima_tentativa=stale_time)
-    control.record(message_id=message.message_id,uid=message.uid,group_key=failed['group_key'],status='PROCESSANDO',data_ultima_tentativa=stale_time)
-    assert process_message(message,control,counting,retry_errors=True,**kwargs)=='SUCESSO'
+    recent_time=datetime.now().isoformat(timespec='seconds')
+    control.record(message_id=message.message_id,uid=message.uid,status='PROCESSANDO',tentativas=100,data_ultima_tentativa=recent_time)
+    control.record(message_id=message.message_id,uid=message.uid,group_key=failed['group_key'],status='PROCESSANDO',tentativas=100,data_ultima_tentativa=recent_time)
+    assert process_message(message,control,counting,**kwargs)=='SUCESSO'
     assert counting.classifications==1 and counting.analyses==4
-    assert control.attempts(message.message_id,message.uid)==2
-    assert control.attempts(message.message_id,message.uid,failed['group_key'])==2
+    assert control.attempts(message.message_id,message.uid)==101
+    assert control.attempts(message.message_id,message.uid,failed['group_key'])==101
     assert control.find(message.message_id,message.uid,failed['group_key'])['id_processamento']!=old_group_process
     assert control.find(message.message_id,message.uid)['id_processamento']!=old_parent_process
     assert (tmp_path/'history'/old_parent_process/'metadata.json').exists()
@@ -181,3 +182,98 @@ def test_retry_errors_recovers_stale_email_and_only_stale_group(tmp_path):
     for lot,row in successes.items():
         current=control.find(message.message_id,message.uid,row['group_key'])
         assert current['status']=='SUCESSO' and current['tentativas']==1 and current['id_processamento']==row['id_processamento']
+
+
+@pytest.mark.parametrize('mode',['NORMAL','BACKFILL'])
+@pytest.mark.parametrize('status',['ERRO','PROCESSANDO','IGNORADO','ESTADO_ANTIGO'])
+def test_execution_processes_every_non_success_state_even_after_100_attempts(tmp_path,status,mode):
+    message=make_message(tmp_path,['policy.pdf','bill.pdf'],f'state-{status}@example')
+    client=GroupClient([g('01','policy.pdf','bill.pdf')])
+    excel=tmp_path/'ops.xlsx';setup_excel(excel);control=RobotControl(tmp_path/'robot.xlsx',max_attempts=1);counting=CountingOpenRouter(client)
+    kwargs=dict(root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history',mode=mode)
+    assert process_message(message,control,counting,**kwargs)=='SUCESSO'
+    group_row=next(row for row in control.rows() if row.get('group_key'))
+    control.record(message_id=message.message_id,uid=message.uid,status=status,tentativas=100)
+    control.record(message_id=message.message_id,uid=message.uid,group_key=group_row['group_key'],status=status,tentativas=100)
+    assert process_message(message,control,counting,**kwargs)=='SUCESSO'
+    assert counting.classifications==1 and counting.analyses==2
+    final=control.find(message.message_id,message.uid,group_row['group_key'])
+    assert final['status']=='SUCESSO' and final['tentativas']==101
+
+
+def test_success_with_changed_hash_is_analyzed_again_and_file_conflict_is_safe(tmp_path):
+    names=['policy.pdf','bill.pdf'];message=make_message(tmp_path,names,'changed-content@example')
+    changed=make_message(tmp_path,names,'changed-content@example',payload=pdf_bytes(320,320))
+    client=GroupClient([g('01','policy.pdf','bill.pdf')]);excel=tmp_path/'ops.xlsx';setup_excel(excel)
+    control=RobotControl(tmp_path/'robot.xlsx');counting=CountingOpenRouter(client)
+    kwargs=dict(root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history',mode='BACKFILL')
+    assert process_message(message,control,counting,**kwargs)=='SUCESSO'
+    assert process_message(changed,control,counting,**kwargs)=='ERRO'
+    assert counting.classifications==2 and counting.analyses==2
+    rows=[row for row in control.rows() if row.get('group_key')]
+    assert sorted(row['status'] for row in rows)==['ERRO','SUCESSO']
+    assert rows[0]['hash_apolice']!=rows[1]['hash_apolice']
+    assert len(list((tmp_path/'docs').rglob('*.pdf')))==2
+
+
+def test_keyboard_interrupt_is_recorded_and_next_backfill_resumes(tmp_path):
+    message=make_message(tmp_path,['policy.pdf','bill.pdf'],'interrupt@example')
+    client=GroupClient([g('01','policy.pdf','bill.pdf')])
+    original=client.analyze
+    def interrupt_once(*args,**kwargs):
+        if not getattr(client,'interrupted',False):
+            client.interrupted=True
+            raise KeyboardInterrupt()
+        return original(*args,**kwargs)
+    client.analyze=interrupt_once
+    excel=tmp_path/'ops.xlsx';setup_excel(excel);control=RobotControl(tmp_path/'robot.xlsx');counting=CountingOpenRouter(client)
+    kwargs=dict(root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history',mode='BACKFILL')
+    with pytest.raises(KeyboardInterrupt):process_message(message,control,counting,**kwargs)
+    assert control.find(message.message_id,message.uid)['status']=='ERRO'
+    interrupted_group=next(row for row in control.rows() if row.get('group_key'))
+    assert interrupted_group['status']=='ERRO' and 'Interrompido' in interrupted_group['erro']
+    assert process_message(message,control,counting,**kwargs)=='SUCESSO'
+    assert counting.classifications==1 and counting.analyses==2
+    assert control.attempts(message.message_id,message.uid,interrupted_group['group_key'])==2
+
+
+def test_run_continues_backfill_after_one_email_fails(monkeypatch,tmp_path,capsys):
+    from dataclasses import replace
+    from datetime import date
+    import app.main as main_module
+    first=make_message(tmp_path,['policy_a.pdf','bill_a.pdf'],'first-fails@example')
+    second=make_message(tmp_path,['policy_b.pdf','bill_b.pdf'],'second-succeeds@example')
+    second.uid='446'
+    class FakeMail:
+        save_pdf_attachments=staticmethod(EmailClient.save_pdf_attachments)
+        def __init__(self,*args,**kwargs):self.last_found_count=2;self.last_relevant_count=2
+        def __enter__(self):return self
+        def __exit__(self,*args):return False
+        def messages_between(self,start,end):return iter([first,second])
+    class FakeOpenRouter:
+        def __init__(self):self.classifications=0;self.analyses=[]
+        def classify(self,files,names):
+            self.classifications+=1
+            policy=next(name for name in names if name.startswith('policy_'))
+            bill=next(name for name in names if name.startswith('bill_'))
+            return {'grupos':[g('01',policy,bill)],'outros':[],'observacoes':None}
+        def analyze(self,policy,bill,expected_lot=None):
+            self.analyses.append(policy.name)
+            if policy.name.startswith('policy_a'):raise RuntimeError('falha isolada do primeiro e-mail')
+            result=raw_result(lote={'valor':None,'fonte':'NAO_IDENTIFICADO','confianca':.1})
+            suffix='A' if policy.name=='policy_a.pdf' else 'B'
+            result['orgao']['valor']=f'Órgão {suffix}';result['orgao_normalizado']=f'ORGAO {suffix}'
+            result['numero_concorrencia_original']['valor']=f'0{suffix}/2026'
+            result['numero_concorrencia_normalizado']['valor']=f'0{suffix}-2026'
+            return result
+    fake_client=FakeOpenRouter();ops=tmp_path/'ops.xlsx';setup_excel(ops);control_path=tmp_path/'robot.xlsx'
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main_module,'settings',replace(main_module.settings,email_user='user',email_password='pass',allowed_sender_domains=('@finlandiaseguros.com.br',),robot_control=control_path,root_dir=tmp_path/'docs',policies_excel=ops,dry_run=False,keep_success_temp=True))
+    monkeypatch.setattr(main_module,'EmailClient',FakeMail);monkeypatch.setattr(main_module,'_client',lambda:fake_client)
+    assert main_module.run(backfill_period=(date(2026,9,21),date(2026,10,7)))==0
+    assert 'BACKFILL FINALIZADO' in capsys.readouterr().out
+    assert fake_client.classifications==2 and fake_client.analyses==['policy_a_analise.pdf','policy_b_analise.pdf']
+    control=RobotControl(control_path)
+    assert control.find(first.message_id,first.uid)['status']=='ERRO'
+    assert control.find(second.message_id,second.uid)['status']=='SUCESSO'
+    assert len(list((tmp_path/'docs').rglob('*.pdf')))==2

@@ -30,7 +30,6 @@ class Settings:
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     max_emails_per_run: int = int(os.getenv("MAX_EMAILS_PER_RUN", "100"))
     robot_max_attempts: int = int(os.getenv("ROBOT_MAX_ATTEMPTS", "5"))
-    robot_stale_processing_minutes: int = int(os.getenv("ROBOT_STALE_PROCESSING_MINUTES", "30"))
     keep_success_temp: bool = os.getenv("KEEP_SUCCESS_TEMP", "false").lower() in {"1", "true", "yes"}
 
 settings = Settings()

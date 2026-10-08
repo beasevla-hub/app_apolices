@@ -42,24 +42,24 @@ def test_null_evidence_and_low_confidence():
     with pytest.raises(ValueError):require_minimum(validate_policy(result))
     without_evidence=data()
     with pytest.raises(ValueError,match='Evidência documental ausente'):require_minimum(without_evidence)
-def test_robot_control_status_attempts_retry_and_headers(tmp_path):
+def test_robot_control_status_attempts_and_headers(tmp_path):
     ctl=RobotControl(tmp_path/'robot.xlsx',max_attempts=2)
-    assert ctl.can_retry('m1','1')
     pid=ctl.begin(message_id='m1',uid='1',status='PROCESSANDO',modelo_ia='mock/model')
     assert pid and ctl.attempts('m1','1')==1 and ctl.find('m1')['status']=='PROCESSANDO'
     ctl.record(message_id='m1',uid='1',status='ERRO',erro='fail',pasta_destino='old-path')
-    assert ctl.can_retry('m1','1')
     ctl.begin(message_id='m1',uid='1')
     assert ctl.find('m1')['erro'] is None and ctl.find('m1')['pasta_destino'] is None
     ctl.record(message_id='m1',uid='1',status='ERRO',erro='new failure')
-    assert not ctl.can_retry('m1','1')
+    assert ctl.attempts('m1','1')==2
+    ctl.begin(message_id='m1',uid='1')
+    assert ctl.attempts('m1','1')==3
     ctl.record(message_id='m1',uid='1',status='SUCESSO',erro='stale')
     assert ctl.find('m1')['erro'] is None
     assert len(ctl.rows()[0])>=len(HEADERS)
 def test_robot_control_duplicate_documents_require_pair_on_same_row(tmp_path):
-    ctl=RobotControl(tmp_path/'r.xlsx');ctl.record(message_id='m1',uid='1',status='SUCESSO',hash_apolice='a',hash_boleto='b')
-    assert ctl.already_processed('',{'a','b'})
-    assert not ctl.already_processed('',{'a','other'})
+    ctl=RobotControl(tmp_path/'r.xlsx');ctl.record(message_id='m1',uid='1',group_key='PAIR-1',status='SUCESSO',hash_apolice='a',hash_boleto='b')
+    assert ctl.completed_pair('m1','PAIR-1','a','b')
+    assert ctl.completed_pair('m1','PAIR-1','a','other') is None
 def test_excel_manual_null_backup_and_explicit_sheet(tmp_path):
     path=tmp_path/'ops.xlsx';wb=Workbook();ws=wb.active;ws.title='APÓLICES';ws.append(ROBOT_MANAGED_COLUMNS+['STATUS','RESPONSÁVEL'])
     ws.append(['Órgão X','THI Engenharia','01/2026','SEI-1',None,None,None,None,None,None,None,'PAGO','BEA']);wb.save(path)
