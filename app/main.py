@@ -52,8 +52,8 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
     client=client or _client();root_dir=root_dir or settings.root_dir;policies_excel=policies_excel or settings.policies_excel
     backup_dir=backup_dir or Path("backups");temp_root=temp_root or Path("data/temp");history_root=history_root or Path("data/historico")
     ident=hashlib.sha256((message.message_id or message.uid).encode()).hexdigest()[:24]
-    if not control.can_retry(message.message_id,message.uid,force_retry_error=retry_errors):
-        log.warning("[%s] Limite de tentativas do e-mail atingido; revisão manual",ident);return "IGNORADO"
+    if not control.can_retry(message.message_id,message.uid,force_retry_error=retry_errors,stale_processing_minutes=settings.robot_stale_processing_minutes):
+        log.warning("[%s] E-mail não elegível para retry (sucesso, PROCESSANDO ativo ou limite normal); revisão manual",ident);return "IGNORADO"
     attempt=control.attempts(message.message_id,message.uid)+1
     process_id=control.begin(message_id=message.message_id,uid=message.uid,data_email=message.date,remetente=message.sender,assunto=message.subject,modelo_ia=settings.openrouter_model)
     run_mode=mode or ("DRY_RUN" if dry_run else "NORMAL")
@@ -92,9 +92,12 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
             if retry_errors and prior_group and prior_group.get("status")=="IGNORADO":
                 detail.update(status="IGNORADO",observacao="Grupo IGNORADO preservado; --retry-errors só reprocessa ERRO")
                 continue
+            if retry_errors and prior_group and prior_group.get("status")=="PROCESSANDO" and not control.can_retry(message.message_id,message.uid,group_key,force_retry_error=True,stale_processing_minutes=settings.robot_stale_processing_minutes):
+                detail.update(status="PROCESSANDO",observacao="Grupo ainda recente; não foi assumido como abandonado")
+                continue
             if group.problema:
                 detail.update(status="ERRO",erro=group.problema)
-                if control.can_retry(message.message_id,message.uid,group_key,force_retry_error=retry_errors):
+                if control.can_retry(message.message_id,message.uid,group_key,force_retry_error=retry_errors,stale_processing_minutes=settings.robot_stale_processing_minutes):
                     issue_process=control.begin(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,modelo_ia=settings.openrouter_model)
                     control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,status="ERRO",erro=group.problema,modelo_ia=settings.openrouter_model,id_processamento=issue_process)
                 else:detail["erro"]="Limite de tentativas do grupo atingido; revisão manual"
@@ -111,7 +114,7 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
                 control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=reused_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="SUCESSO",erro=None,modelo_ia=settings.openrouter_model,id_processamento=earlier.get("id_processamento") if earlier else process_id)
                 detail.update(status="SUCESSO",lote=reused_lot,lote_associado=group.lote,id_processamento_anterior=earlier.get("id_processamento") if earlier else None,observacao="Par já processado em outra mensagem; sem chamada OpenRouter")
                 continue
-            if not control.can_retry(message.message_id,message.uid,group_key,force_retry_error=retry_errors):
+            if not control.can_retry(message.message_id,message.uid,group_key,force_retry_error=retry_errors,stale_processing_minutes=settings.robot_stale_processing_minutes):
                 detail.update(status="ERRO",erro="Limite de tentativas do grupo atingido; revisão manual")
                 issues.append(f"Grupo {group_key}: limite de tentativas atingido")
                 continue
@@ -161,6 +164,8 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
             overall="IGNORADO";error="DRY_RUN: análise concluída sem publicação"
         elif retry_errors and statuses and "IGNORADO" in statuses and all(status in {"SUCESSO","IGNORADO"} for status in statuses):
             overall="IGNORADO";error="Um ou mais grupos permanecem IGNORADO; --retry-errors só reprocessa ERRO"
+        elif retry_errors and "PROCESSANDO" in statuses and not issues:
+            overall="PROCESSANDO";error="Há grupo ainda PROCESSANDO dentro do intervalo de segurança; nenhum retry foi iniciado para ele"
         elif statuses and all(status in valid_statuses for status in statuses) and not issues:
             overall="SUCESSO";error=None
         elif not groups and not issues:
@@ -195,8 +200,8 @@ def run(dry_run:bool=False,backfill_period:tuple[date,date]|None=None,retry_erro
                 if prior and prior.get("status")=="SUCESSO":counts["IGNORADO"]+=1;continue
                 if retry_errors and prior and prior.get("status")=="IGNORADO":
                     log.info("Mensagem %s permanece IGNORADO; --retry-errors só reprocessa ERRO",message.message_id or message.uid);counts["IGNORADO"]+=1;continue
-                if not control.can_retry(message.message_id,message.uid,force_retry_error=retry_errors):
-                    log.warning("Mensagem %s excedeu tentativas; ignorada para revisão",message.message_id or message.uid);counts["IGNORADO"]+=1;continue
+                if not control.can_retry(message.message_id,message.uid,force_retry_error=retry_errors,stale_processing_minutes=settings.robot_stale_processing_minutes):
+                    log.warning("Mensagem %s não elegível para retry; ignorada para revisão",message.message_id or message.uid);counts["IGNORADO"]+=1;continue
                 if client is None:client=CountingOpenRouter(_client())
                 try:result=process_message(message,control,client=client,dry_run=dry_run,mode=mode,retry_errors=retry_errors)
                 except Exception as exc:

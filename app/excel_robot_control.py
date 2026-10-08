@@ -1,12 +1,14 @@
 """Planilha técnica de idempotência, retries e estado por e-mail/par documental."""
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime,timedelta,timezone
 from uuid import uuid4
 from functools import lru_cache
+import logging
 import os
 from openpyxl import Workbook,load_workbook
 from openpyxl.styles import Font,PatternFill
 HEADERS=["message_id","uid","group_key","lote","data_email","remetente","assunto","hash_apolice","hash_boleto","status","tentativas","modelo_ia","data_ultima_tentativa","data_processamento","erro","pasta_destino","id_processamento"]
+log=logging.getLogger(__name__)
 class RobotControl:
     def __init__(self,path:Path,max_attempts:int=5):self.path=Path(path);self.max_attempts=max_attempts
     def _open(self):
@@ -70,13 +72,32 @@ class RobotControl:
         return match(state(counts),state(known))
     def attempts(self,message_id:str,uid:str="",group_key:str|None=None)->int:
         record=self.find(message_id,uid,group_key);return int(record.get("tentativas") or 0) if record else 0
-    def can_retry(self,message_id:str,uid:str="",group_key:str|None=None,force_retry_error:bool=False)->bool:
+    @staticmethod
+    def _processing_is_stale(value,stale_processing_minutes:int)->bool:
+        try:
+            minutes=int(stale_processing_minutes)
+            if minutes<0:raise ValueError("limite de minutos negativo")
+            if isinstance(value,datetime):last_attempt=value
+            else:
+                text=str(value or "").strip()
+                if not text or ("T" not in text and " " not in text):raise ValueError("timestamp ausente ou sem componente de hora")
+                last_attempt=datetime.fromisoformat(text.replace("Z","+00:00"))
+            # astimezone(UTC) interpreta valores naive no fuso local do computador,
+            # compatível com os registros antigos criados por datetime.now().
+            last_attempt_utc=last_attempt.astimezone(timezone.utc)
+            return datetime.now(timezone.utc)-last_attempt_utc>timedelta(minutes=minutes)
+        except (TypeError,ValueError,OverflowError) as exc:
+            log.warning("Registro PROCESSANDO não será retomado: data_ultima_tentativa ausente/inválida ou política inválida (%s)",exc)
+            return False
+    def can_retry(self,message_id:str,uid:str="",group_key:str|None=None,force_retry_error:bool=False,stale_processing_minutes:int=30)->bool:
         row=self.find(message_id,uid,group_key)
         if not row:return True
         status=row.get("status")
         if status=="SUCESSO":return False
         if force_retry_error and status=="IGNORADO":return False
         if force_retry_error and status=="ERRO":return True
+        if force_retry_error and status=="PROCESSANDO":
+            return self._processing_is_stale(row.get("data_ultima_tentativa"),stale_processing_minutes)
         return int(row.get("tentativas") or 0)<self.max_attempts
     def begin(self,**data)->str:
         process_id=data.get("id_processamento") or uuid4().hex[:12].upper()

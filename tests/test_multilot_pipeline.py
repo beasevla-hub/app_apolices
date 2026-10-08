@@ -150,3 +150,34 @@ def test_retry_errors_reuses_classification_and_reanalyzes_only_failed_group(tmp
     rows=[row for row in control.rows() if (row.get('group_key') or '').startswith('PAIR-')]
     assert all(row['status']=='SUCESSO' for row in rows)
     assert sorted(row['tentativas'] for row in rows)==[1,1,2]
+
+
+def test_retry_errors_recovers_stale_email_and_only_stale_group(tmp_path):
+    from datetime import datetime,timedelta
+    names=[f'{kind}_{idx:02d}.pdf' for idx in range(1,4) for kind in ('policy','bill')]
+    message=make_message(tmp_path,names,'stale-processing-groups@example')
+    groups=[g('01','policy_01.pdf','bill_01.pdf'),g('02','policy_02.pdf','bill_02.pdf'),g('03','policy_03.pdf','bill_03.pdf')]
+    client=GroupClient(groups,fail_once='02')
+    excel=tmp_path/'ops.xlsx';setup_excel(excel);control=RobotControl(tmp_path/'robot.xlsx',max_attempts=1);counting=CountingOpenRouter(client)
+    kwargs=dict(root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history',mode='BACKFILL')
+    assert process_message(message,control,counting,**kwargs)=='ERRO'
+    rows=[row for row in control.rows() if (row.get('group_key') or '').startswith('PAIR-')]
+    failed=next(row for row in rows if row['lote']=='02');successes={row['lote']:row for row in rows if row['status']=='SUCESSO'}
+    parent=control.find(message.message_id,message.uid)
+    old_group_process=failed['id_processamento'];old_parent_process=parent['id_processamento']
+    stale_time=(datetime.now()-timedelta(hours=2)).isoformat(timespec='seconds')
+    control.record(message_id=message.message_id,uid=message.uid,status='PROCESSANDO',data_ultima_tentativa=stale_time)
+    control.record(message_id=message.message_id,uid=message.uid,group_key=failed['group_key'],status='PROCESSANDO',data_ultima_tentativa=stale_time)
+    assert process_message(message,control,counting,retry_errors=True,**kwargs)=='SUCESSO'
+    assert counting.classifications==1 and counting.analyses==4
+    assert control.attempts(message.message_id,message.uid)==2
+    assert control.attempts(message.message_id,message.uid,failed['group_key'])==2
+    assert control.find(message.message_id,message.uid,failed['group_key'])['id_processamento']!=old_group_process
+    assert control.find(message.message_id,message.uid)['id_processamento']!=old_parent_process
+    assert (tmp_path/'history'/old_parent_process/'metadata.json').exists()
+    old_metadata=json.loads((tmp_path/'history'/old_parent_process/'metadata.json').read_text())
+    old_failed=next(item for item in old_metadata['lotes'] if item['group_key']==failed['group_key'])
+    assert old_failed['status']=='ERRO'
+    for lot,row in successes.items():
+        current=control.find(message.message_id,message.uid,row['group_key'])
+        assert current['status']=='SUCESSO' and current['tentativas']==1 and current['id_processamento']==row['id_processamento']
