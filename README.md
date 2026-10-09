@@ -43,6 +43,8 @@ No backfill, status geral do e-mail, estado antigo do grupo e contador de tentat
 
 Uma falha em um grupo ou e-mail não interrompe os demais. Em perda de transporte IMAP, o cliente fecha o socket quebrado, reconecta com espera limitada de 2/4/8 segundos, seleciona novamente a pasta e repete o UID atual. Se os retries se esgotarem, o lote para com **resumo parcial explícito**; sucessos já persistidos continuam registrados e podem ser retomados sem reanálise.
 
+`Ctrl+C` interrompe imediatamente o processamento corrente: não tenta novamente a chamada HTTP interrompida nem avança para o próximo e-mail. O robô tenta persistir o grupo/e-mail como `ERRO`, salva o histórico disponível, preserva grupos já concluídos e encerra com uma mensagem curta (código 130). Uma nova execução do mesmo intervalo retoma o que não concluiu.
+
 Ao final do backfill, o resumo informa mensagens candidatas, remetentes relevantes, resultados, classificações, análises de apólices e total de chamadas. Se não houver remetentes relevantes, informa isso sem falha.
 
 ## Classificação por lote e publicação
@@ -62,6 +64,8 @@ Os campos estruturados vêm como `{valor, fonte, confianca}`. A IA não deve inv
 O Excel operacional usa exclusivamente a aba `APÓLICES`; sem essa aba, o robô falha sem escolher outra. A correspondência de cabeçalhos tolera ordem/whitespace e sinônimos usuais. A chave é **empresa normalizada + SEI + concorrência + lote** quando há SEI; sem SEI, **empresa + concorrência + órgão + lote**, e só pode recorrer ao órgão quando a linha preexistente também não contém SEI. Um SEI diferente não cai no fallback. Mais de uma correspondência gera `POSSIVEL_DUPLICATA`, sem escrita. Se não houver coluna `LOTE`, uma nova coluna é acrescentada ao final; entradas sem lote mantêm a célula vazia.
 
 São atualizadas somente as colunas gerenciadas pelo robô (incluindo `LOTE`); valores `null` não apagam dados existentes. Para workbooks existentes, são preservados os demais campos, fórmulas, estilos, larguras, filtros, tabelas, freeze panes e linhas manuais. Um backup é criado antes da alteração; o salvamento é temporário/atômico. Se o Excel falhar depois de publicar PDFs novos, o robô tenta removê-los e não grava sucesso daquele grupo.
+
+A publicação valida que cada origem ainda existe e que o diretório de destino está disponível; copia para um `.tmp` exclusivo no destino, verifica o hash e só então faz a troca atômica. O log de falha inclui operação, caminhos absolutos (origem/destino/temporário), existência/acesso, componentes e comprimentos dos caminhos e indícios de pastas sincronizadas (OneDrive/SharePoint/Dropbox/Google Drive, quando detectáveis), além da exceção original. Temporários e PDFs novos da tentativa são removidos após falha; arquivos preexistentes com hash igual são idempotentes e conteúdo diferente nunca é sobrescrito.
 
 Cada tentativa cria:
 

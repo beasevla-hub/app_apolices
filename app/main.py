@@ -47,6 +47,43 @@ def _test()->int:
     data=PolicyData(empresa_normalizada="THI",orgao="Órgão teste",numero_concorrencia_normalizado="1-2026",vigencia_data_inicial=date(2026,1,1),vigencia_data_final=date(2026,12,31),par_coerente=True,confianca_geral=.95,evidencias=evidence)
     require_minimum(data);log.info("Smoke test local concluído; validação estrutural e de confiança OK");return 0
 
+def _best_effort(action)->None:
+    """Tenta persistir estado durante unwind sem transformar interrupções em retry."""
+    try:action()
+    except KeyboardInterrupt:pass
+    except SystemExit:pass
+    except Exception:pass
+
+def _record_group_error(control:RobotControl,message:MailMessage,active_group:dict,error:str)->bool:
+    """Registra ERRO do grupo, exceto quando o controle já confirma sucesso nesse grupo."""
+    existing=control.find(message.message_id,message.uid,active_group["group_key"])
+    completed=bool(existing and existing.get("status")=="SUCESSO")
+    detail=active_group.get("detail")
+    if completed:
+        if detail:detail.update(status="SUCESSO",observacao="Par confirmado como concluído antes da interrupção")
+        return True
+    control.record(message_id=message.message_id,uid=message.uid,group_key=active_group["group_key"],lote=active_group.get("lote"),hash_apolice=active_group.get("hash_apolice"),hash_boleto=active_group.get("hash_boleto"),status="ERRO",erro=error,modelo_ia=settings.openrouter_model,id_processamento=active_group.get("id_processamento"),pasta_destino=active_group.get("pasta_destino"))
+    if detail:detail.update(status="ERRO",erro=error)
+    return False
+
+def _persist_interruption(control:RobotControl,message:MailMessage,process_id:str,history:Path,metadata:dict,active_group:dict|None,error:str,classification_calls:int,analysis_calls:int,cache_hit:bool)->None:
+    """Registra ERRO de e-mail/grupo quando possível; nunca usa log/traceback nesta via."""
+    if active_group:
+        group_error=error+"; grupo poderá ser retomado no próximo backfill"
+        completed=False
+        try:completed=_record_group_error(control,message,active_group,group_error)
+        except KeyboardInterrupt:pass
+        except SystemExit:pass
+        except Exception:pass
+        if not completed:
+            issues=metadata.setdefault("issues",[])
+            issue=f"Grupo {active_group['group_key']}: {group_error}"
+            if issue not in issues:issues.append(issue)
+    metadata.update(status="ERRO",erro=error,chamadas_openrouter={"classificacao":classification_calls,"analises":analysis_calls,"total":classification_calls+analysis_calls},classificacao_cache_reutilizada=cache_hit)
+    _best_effort(lambda:_write_json(history/"metadata.json",metadata))
+    _best_effort(lambda:_write_json(history/"resultado.json",{"grupos":metadata.get("lotes",[]),"issues":metadata.get("issues",[]),"erro":error}))
+    _best_effort(lambda:control.record(message_id=message.message_id,uid=message.uid,status="ERRO",erro=error,modelo_ia=settings.openrouter_model,id_processamento=process_id))
+
 def process_message(message:MailMessage,control:RobotControl,client=None,dry_run:bool=False,root_dir:Path|None=None,policies_excel:Path|None=None,backup_dir:Path|None=None,temp_root:Path|None=None,history_root:Path|None=None,mode:str|None=None)->str:
     """Classifica uma vez; analisa/publica cada par independentemente."""
     client=client or _client();root_dir=root_dir or settings.root_dir;policies_excel=policies_excel or settings.policies_excel
@@ -55,10 +92,11 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
     process_id=control.begin(message_id=message.message_id,uid=message.uid,data_email=message.date,remetente=message.sender,assunto=message.subject,modelo_ia=settings.openrouter_model)
     run_mode=mode or ("DRY_RUN" if dry_run else "NORMAL")
     if dry_run and run_mode=="BACKFILL":run_mode="BACKFILL_DRY_RUN"
-    temp=temp_root/ident/process_id;history=history_root/process_id;temp.mkdir(parents=True,exist_ok=True);history.mkdir(parents=True,exist_ok=True)
-    classification_calls=0;analysis_calls=0;cache_hit=False
+    temp=temp_root/ident/process_id;history=history_root/process_id
+    classification_calls=0;analysis_calls=0;cache_hit=False;active_group=None
     metadata={"id_processamento":process_id,"message_id":message.message_id,"uid":message.uid,"data_email":message.date,"remetente":message.sender,"assunto":message.subject,"modelo":settings.openrouter_model,"timestamp_utc":datetime.now(timezone.utc).isoformat(),"modo_execucao":run_mode,"quantidade_pdfs":0,"quantidade_grupos":0,"quantidade_lotes":0,"lotes":[],"issues":[],"observacoes_classificacao":None,"chamadas_openrouter":{"classificacao":0,"analises":0,"total":0},"classificacao_cache_reutilizada":False}
     try:
+        temp.mkdir(parents=True,exist_ok=True);history.mkdir(parents=True,exist_ok=True)
         attachments=valid_pdfs(EmailClient.save_pdf_attachments(message,temp));metadata["quantidade_pdfs"]=len(attachments)
         if len(attachments)<2:raise ValueError("Menos de dois PDFs válidos; revisão manual necessária")
         hashes_by_name={path.name:sha256(path) for path in attachments}
@@ -83,7 +121,9 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
             if group.problema:
                 detail.update(status="ERRO",erro=group.problema)
                 issue_process=control.begin(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,modelo_ia=settings.openrouter_model)
+                active_group={"group_key":group_key,"lote":group.lote,"id_processamento":issue_process,"detail":detail}
                 control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,status="ERRO",erro=group.problema,modelo_ia=settings.openrouter_model,id_processamento=issue_process)
+                active_group=None
                 continue
             policy,bill=group.apolice,group.boleto;policy_hash,bill_hash=sha256(policy),sha256(bill)
             detail["hash_apolice"]=policy_hash;detail["hash_boleto"]=bill_hash
@@ -97,6 +137,7 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
                 detail.update(status="SUCESSO",lote=reused_lot,lote_associado=group.lote,id_processamento_anterior=completed.get("id_processamento"),observacao="Par já concluído com os mesmos hashes; sem nova análise")
                 continue
             group_process=control.begin(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,hash_apolice=policy_hash,hash_boleto=bill_hash,data_email=message.date,remetente=message.sender,assunto=message.subject,modelo_ia=settings.openrouter_model)
+            active_group={"group_key":group_key,"lote":group.lote,"hash_apolice":policy_hash,"hash_boleto":bill_hash,"id_processamento":group_process,"detail":detail,"pasta_destino":None}
             detail.update(status="PROCESSANDO",id_processamento=group_process)
             metadata["chamadas_openrouter"]={"classificacao":classification_calls,"analises":analysis_calls,"total":classification_calls+analysis_calls}
             created=[];destination=None;operational_lot=group.lote
@@ -114,34 +155,34 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
                 require_minimum(data,lote_associado=group.lote)
                 if data.lote is not None and "lote" not in data.evidencias:raise ValueError("Extração retornou lote sem evidência; revisão manual")
                 operational_lot=data.lote_operacional
+                active_group["lote"]=operational_lot
                 group_label=lot_label(operational_lot, f"GRUPO {index:02d}") if multiple_lots else None
                 detail.update(lote=operational_lot,lote_associado=group.lote,lote_documental=data.lote,grupo_pasta=group_label,resultado="lotes/"+group_key+"/resultado.json")
                 if dry_run:
                     from .file_manager import build_destination,build_document_names
                     detail.update(status="DRY_RUN",destino_previsto=str(build_destination(root_dir,data,multiple_lots,group_label)),nomes_previstos=list(build_document_names(data,multiple_lots,group_label)))
                     control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="IGNORADO",erro="DRY_RUN: lote analisado sem publicação",modelo_ia=settings.openrouter_model,id_processamento=group_process)
+                    active_group=None
                 else:
                     destination,created=publish(root_dir,data,policy,bill,return_created=True,multiple_lots=multiple_lots,group_label=group_label)
+                    active_group["pasta_destino"]=str(destination)
                     try:update_workbook(policies_excel,data,backup_dir)
-                    except BaseException:
+                    except (Exception,KeyboardInterrupt,SystemExit):
+                        cleanup_errors=[]
                         for target in created:
                             try:target.unlink(missing_ok=True)
-                            except OSError:log.exception("[%s] Rollback do grupo %s falhou",process_id,group_key)
+                            except OSError as cleanup_exc:cleanup_errors.append(f"{target.resolve(strict=False)}: {cleanup_exc}")
+                        if cleanup_errors:log.error("Rollback após falha do Excel para grupo %s incompleto: %s",group_key,"; ".join(cleanup_errors))
                         raise
                     control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="SUCESSO",modelo_ia=settings.openrouter_model,pasta_destino=str(destination),id_processamento=group_process)
                     detail.update(status="SUCESSO",destino=str(destination),id_processamento=group_process)
-            except (KeyboardInterrupt,SystemExit) as exc:
-                error=f"Interrompido ({type(exc).__name__}); grupo poderá ser retomado no próximo backfill"
-                log.exception("[%s] Grupo %s interrompido",process_id,group_key)
-                control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="ERRO",erro=error,modelo_ia=settings.openrouter_model,id_processamento=group_process,pasta_destino=str(destination) if destination else None)
-                detail.update(status="ERRO",erro=error);issues.append(f"Grupo {group_key}: {error}")
-                metadata.update(status="ERRO",issues=issues,chamadas_openrouter={"classificacao":classification_calls,"analises":analysis_calls,"total":classification_calls+analysis_calls})
-                _write_json(history/"metadata.json",metadata);_write_json(history/"resultado.json",{"grupos":metadata["lotes"],"issues":issues,"erro":error})
-                raise
+                    active_group=None
             except Exception as exc:
-                log.exception("[%s] Grupo %s falhou; os demais grupos continuarão",process_id,group_key)
-                control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="ERRO",erro=str(exc)[:1000],modelo_ia=settings.openrouter_model,id_processamento=group_process,pasta_destino=str(destination) if destination else None)
-                detail.update(status="ERRO",erro=str(exc)[:1000]);issues.append(f"Grupo {group_key}: {exc}")
+                group_error=str(exc)[:1000]
+                control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="ERRO",erro=group_error,modelo_ia=settings.openrouter_model,id_processamento=group_process,pasta_destino=str(destination) if destination else None)
+                detail.update(status="ERRO",erro=group_error);issues.append(f"Grupo {group_key}: {group_error}")
+                active_group=None
+                log.error("[%s] Grupo %s falhou; os demais grupos continuarão: %s",process_id,group_key,exc,exc_info=(type(exc),exc,exc.__traceback__))
         if issues:metadata["issues"]=issues
         statuses=[item.get("status") for item in metadata["lotes"]]
         valid_statuses={"SUCESSO"}
@@ -160,18 +201,30 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
         return "DRY_RUN" if dry_run and overall=="IGNORADO" else overall
     except (KeyboardInterrupt,SystemExit) as exc:
         error=f"Interrompido ({type(exc).__name__}); mensagem poderá ser retomada no próximo backfill"
-        log.exception("[%s] Processamento interrompido",process_id)
+        _persist_interruption(control,message,process_id,history,metadata,active_group,error,classification_calls,analysis_calls,cache_hit)
+        raise
+    except Exception as exc:
+        error=str(exc)[:1000]
+        if active_group:
+            try:_record_group_error(control,message,active_group,error)
+            except KeyboardInterrupt:
+                _persist_interruption(control,message,process_id,history,metadata,active_group,"Interrompido (KeyboardInterrupt)",classification_calls,analysis_calls,cache_hit)
+                raise
+            except SystemExit:
+                _persist_interruption(control,message,process_id,history,metadata,active_group,"Interrompido (SystemExit)",classification_calls,analysis_calls,cache_hit)
+                raise
+            active_group=None
         metadata.update(status="ERRO",erro=error,chamadas_openrouter={"classificacao":classification_calls,"analises":analysis_calls,"total":classification_calls+analysis_calls},classificacao_cache_reutilizada=cache_hit)
         try:
             _write_json(history/"metadata.json",metadata);_write_json(history/"resultado.json",{"grupos":metadata["lotes"],"erro":error})
             control.record(message_id=message.message_id,uid=message.uid,status="ERRO",erro=error,modelo_ia=settings.openrouter_model,id_processamento=process_id)
-        except Exception:log.exception("[%s] Não foi possível persistir o estado da interrupção",process_id)
-        raise
-    except Exception as exc:
-        log.exception("[%s] Falha no processamento do e-mail: %s",process_id,exc)
-        metadata.update(status="ERRO",erro=str(exc)[:1000],chamadas_openrouter={"classificacao":classification_calls,"analises":analysis_calls,"total":classification_calls+analysis_calls},classificacao_cache_reutilizada=cache_hit);_write_json(history/"metadata.json",metadata);_write_json(history/"resultado.json",{"grupos":metadata["lotes"],"erro":str(exc)[:1000]})
-        try:control.record(message_id=message.message_id,uid=message.uid,status="ERRO",erro=str(exc)[:1000],modelo_ia=settings.openrouter_model,id_processamento=process_id)
-        except Exception:log.exception("[%s] Não foi possível persistir o erro do e-mail",process_id)
+        except KeyboardInterrupt:
+            _persist_interruption(control,message,process_id,history,metadata,active_group,"Interrompido (KeyboardInterrupt)",classification_calls,analysis_calls,cache_hit)
+            raise
+        except SystemExit:
+            _persist_interruption(control,message,process_id,history,metadata,active_group,"Interrompido (SystemExit)",classification_calls,analysis_calls,cache_hit)
+            raise
+        log.error("[%s] Falha no processamento do e-mail: %s",process_id,exc,exc_info=(type(exc),exc,exc.__traceback__))
         return "SEM_PDFS" if metadata.get("quantidade_pdfs",0)<2 else "ERRO"
 
 def run(dry_run:bool=False,backfill_period:tuple[date,date]|None=None,retry_errors:bool=False)->int:
@@ -191,9 +244,16 @@ def run(dry_run:bool=False,backfill_period:tuple[date,date]|None=None,retry_erro
                     if client is None:client=CountingOpenRouter(_client())
                     result=process_message(message,control,client=client,dry_run=dry_run,mode=mode)
                 except Exception as exc:
-                    log.exception("Falha inesperada no e-mail %s; continuando lote",message.message_id or message.uid)
                     try:control.record(message_id=message.message_id,uid=message.uid,status="ERRO",erro=str(exc)[:1000],modelo_ia=settings.openrouter_model)
-                    except Exception:log.exception("Não foi possível registrar falha inesperada no controle")
+                    except KeyboardInterrupt:
+                        _best_effort(lambda:control.record(message_id=message.message_id,uid=message.uid,status="ERRO",erro="Interrompido (KeyboardInterrupt); retomar no próximo backfill",modelo_ia=settings.openrouter_model))
+                        raise
+                    except SystemExit:
+                        _best_effort(lambda:control.record(message_id=message.message_id,uid=message.uid,status="ERRO",erro="Interrompido (SystemExit); retomar no próximo backfill",modelo_ia=settings.openrouter_model))
+                        raise
+                    except Exception as record_exc:
+                        log.error("Não foi possível registrar falha inesperada de %s: %s",message.message_id or message.uid,record_exc)
+                    log.error("Falha inesperada no e-mail %s; continuando lote: %s",message.message_id or message.uid,exc,exc_info=(type(exc),exc,exc.__traceback__))
                     result="ERRO"
                 counts[result]=counts.get(result,0)+1
         except IMAPConnectionLost as exc:
@@ -230,5 +290,17 @@ def main()->int:
     if args.backfill and args.fim<args.inicio:parser.error("--fim deve ser igual ou posterior a --inicio")
     if args.test and (args.backfill or args.dry_run):parser.error("--test offline não pode ser combinado com --backfill ou --dry-run")
     try:return _test() if args.test else run(args.dry_run,(args.inicio,args.fim) if args.backfill else None,retry_errors=args.retry_errors)
-    except Exception as exc:log.exception("Execução interrompida: %s",exc);return 1
+    except KeyboardInterrupt:
+        try:sys.stderr.write("Interrompido pelo usuário (Ctrl+C). Itens pendentes podem ser retomados em uma próxima execução.\n")
+        except KeyboardInterrupt:pass
+        except OSError:pass
+        return 130
+    except Exception as exc:
+        try:log.exception("Execução falhou: %s",exc)
+        except KeyboardInterrupt:
+            try:sys.stderr.write("Interrompido pelo usuário (Ctrl+C). Itens pendentes podem ser retomados em uma próxima execução.\n")
+            except KeyboardInterrupt:pass
+            except OSError:pass
+            return 130
+        return 1
 if __name__=="__main__":sys.exit(main())

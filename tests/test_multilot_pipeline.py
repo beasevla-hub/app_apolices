@@ -277,3 +277,87 @@ def test_run_continues_backfill_after_one_email_fails(monkeypatch,tmp_path,capsy
     assert control.find(first.message_id,first.uid)['status']=='ERRO'
     assert control.find(second.message_id,second.uid)['status']=='SUCESSO'
     assert len(list((tmp_path/'docs').rglob('*.pdf')))==2
+
+
+
+def test_run_ctrl_c_stops_before_next_email_and_later_backfill_resumes(tmp_path,monkeypatch):
+    from dataclasses import replace
+    from datetime import date
+    import app.main as main_module
+    payload=pdf_bytes()
+    first=make_message(tmp_path,['policy_a.pdf','bill_a.pdf'],'interrupt-run-a@example',payload=payload)
+    second=make_message(tmp_path,['policy_b.pdf','bill_b.pdf'],'interrupt-run-b@example',payload=payload);second.uid='446'
+    class FakeMail:
+        save_pdf_attachments=staticmethod(EmailClient.save_pdf_attachments)
+        def __init__(self,*args,**kwargs):self.last_found_count=2;self.last_relevant_count=2
+        def __enter__(self):return self
+        def __exit__(self,*args):return False
+        def messages_between(self,start,end):return iter([first,second])
+    class InterruptingOpenRouter:
+        def __init__(self):self.classifications=0;self.analysis_calls=0;self.interrupt_next=True
+        def classify(self,files,names):
+            self.classifications+=1
+            policy_name=next(name for name in names if name.startswith('policy_'))
+            bill_name=next(name for name in names if name.startswith('bill_'))
+            return {'grupos':[g('01',policy_name,bill_name)],'outros':[],'observacoes':None}
+        def analyze(self,policy,bill,expected_lot=None):
+            self.analysis_calls+=1
+            if self.interrupt_next:
+                self.interrupt_next=False
+                raise KeyboardInterrupt()
+            return raw_result(lote={'valor':'01','fonte':'APOLICE','confianca':.98})
+    client=InterruptingOpenRouter();ops=tmp_path/'ops.xlsx';setup_excel(ops);control_path=tmp_path/'robot.xlsx'
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main_module,'settings',replace(main_module.settings,email_user='user',email_password='pass',allowed_sender_domains=('@finlandiaseguros.com.br',),robot_control=control_path,root_dir=tmp_path/'docs',policies_excel=ops,dry_run=False,keep_success_temp=True))
+    monkeypatch.setattr(main_module,'EmailClient',FakeMail);monkeypatch.setattr(main_module,'_client',lambda:client)
+    period=(date(2026,9,21),date(2026,10,7))
+    with pytest.raises(KeyboardInterrupt):main_module.run(backfill_period=period)
+    control=RobotControl(control_path)
+    assert client.classifications==1 and client.analysis_calls==1
+    assert control.find(first.message_id,first.uid)['status']=='ERRO'
+    interrupted_group=next(row for row in control.rows() if row.get('group_key'))
+    assert interrupted_group['status']=='ERRO' and 'KeyboardInterrupt' in interrupted_group['erro']
+    assert control.find(second.message_id,second.uid) is None
+    first_history=tmp_path/'data'/'historico'/control.find(first.message_id,first.uid)['id_processamento']
+    assert json.loads((first_history/'metadata.json').read_text())['status']=='ERRO'
+    assert (first_history/'resultado.json').exists()
+
+    assert main_module.run(backfill_period=period)==0
+    assert client.analysis_calls==2  # a chamada interrompida não repetiu; só uma execução nova analisou o grupo.
+    assert client.classifications==2  # a primeira mensagem reutiliza cache; classifica-se apenas a segunda.
+    assert control.find(first.message_id,first.uid,interrupted_group['group_key'])['status']=='SUCESSO'
+    assert control.find(second.message_id,second.uid)['status']=='SUCESSO'
+
+
+def test_main_converts_keyboard_interrupt_to_short_exit_message(monkeypatch,capsys):
+    import sys
+    import app.main as main_module
+    monkeypatch.setattr(sys,'argv',['app-apolices','--test'])
+    monkeypatch.setattr(main_module,'_test',lambda:(_ for _ in ()).throw(KeyboardInterrupt()))
+    assert main_module.main()==130
+    captured=capsys.readouterr()
+    assert 'Ctrl+C' in captured.err and 'Traceback' not in captured.err
+
+
+
+def test_ctrl_c_in_later_group_preserves_earlier_success(tmp_path):
+    message=make_message(tmp_path,['policy_01.pdf','bill_01.pdf','policy_02.pdf','bill_02.pdf'],'interrupt-second-group@example')
+    class InterruptSecondGroup(GroupClient):
+        def analyze(self,policy,bill,expected_lot=None):
+            if expected_lot=='02' and not getattr(self,'interrupted',False):
+                self.interrupted=True;self.analyses.append((policy.name,bill.name,expected_lot));raise KeyboardInterrupt()
+            return super().analyze(policy,bill,expected_lot)
+    client=InterruptSecondGroup([g('01','policy_01.pdf','bill_01.pdf'),g('02','policy_02.pdf','bill_02.pdf')])
+    excel=tmp_path/'ops.xlsx';setup_excel(excel);control=RobotControl(tmp_path/'robot.xlsx');counting=CountingOpenRouter(client)
+    kwargs=dict(root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history',mode='BACKFILL')
+    with pytest.raises(KeyboardInterrupt):process_message(message,control,counting,**kwargs)
+    group_rows={row['lote']:row for row in control.rows() if row.get('group_key')}
+    first_success=group_rows['01'];second_interrupted=group_rows['02']
+    assert first_success['status']=='SUCESSO' and first_success['tentativas']==1
+    assert second_interrupted['status']=='ERRO' and 'KeyboardInterrupt' in second_interrupted['erro']
+    assert process_message(message,control,counting,**kwargs)=='SUCESSO'
+    after={row['lote']:row for row in control.rows() if row.get('group_key')}
+    assert after['01']['status']=='SUCESSO' and after['01']['tentativas']==1
+    assert after['01']['id_processamento']==first_success['id_processamento']
+    assert after['02']['status']=='SUCESSO' and after['02']['tentativas']==2
+    assert counting.classifications==1 and counting.analyses==3

@@ -142,6 +142,19 @@ def test_openrouter_invalid_json_retries_limited(tmp_path,monkeypatch):
     with pytest.raises(OpenRouterError):client.classify([f],[f.name])
     assert count=={'calls':3,'sleeps':2}
 
+def test_openrouter_keyboard_interrupt_is_not_retried(tmp_path,monkeypatch):
+    from app.openrouter_client import OpenRouterClient
+    calls=[]
+    def interrupted_post(*args,**kwargs):
+        calls.append((args,kwargs))
+        raise KeyboardInterrupt()
+    monkeypatch.setattr('app.openrouter_client.httpx.post',interrupted_post)
+    monkeypatch.setattr('app.openrouter_client.time.sleep',lambda _:pytest.fail('Ctrl+C não deve provocar retry'))
+    client=OpenRouterClient('mock-key','mock/model','https://example.test/v1')
+    f=tmp_path/'source.pdf';make_pdf(f)
+    with pytest.raises(KeyboardInterrupt):client.classify([f],[f.name])
+    assert len(calls)==1
+
 def test_phas_and_evidence_conflict_validation():
     result=raw_result();result['empresa']={'valor':'PHAS ENGENHARIA, CONSTRUÇÕES E SERVIÇOS LTDA-ME','fonte':'APOLICE','confianca':.99};result['empresa_normalizada']={'valor':'PHAS ENGENHARIA CONSTRUCOES E SERVICOS LTDA ME','fonte':'APOLICE','confianca':.99};result['tipo_empresa']='PHAS'
     assert validate_policy(result).empresa_normalizada=='PHAS'
