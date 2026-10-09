@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import shutil
-import uuid
+import tempfile
 from .models import PolicyData
 
 INVALID=re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -14,6 +14,7 @@ logger=logging.getLogger("robo_apolices")
 SYNC_MARKERS=("onedrive","sharepoint","dropbox","google drive","googledrive","icloud","syncthing","sync.com")
 # Mantém margem antes do limite clássico de 260 caracteres do Windows.
 MAX_PUBLICATION_PATH_CHARS=240
+PUBLICATION_TEMP_DIR=Path(__file__).resolve().parent.parent/"data"/"tmp_publish"
 
 
 def sanitize_filename(name:str)->str:
@@ -117,10 +118,10 @@ def publish(root:Path,data:PolicyData,policy:Path,bill:Path,return_created:bool=
     destination=build_destination(root,data,multiple_lots,group_label)
     policy_name,bill_name=build_document_names(data,multiple_lots,group_label)
     pairs=[(Path(policy),destination/policy_name),(Path(bill),destination/bill_name)]
-    created=[];temporaries=[];source_hashes={};failed=False;failure_exception=None;operation="validate absolute publication path lengths";active_source,active_destination=pairs[0];active_temp=destination/f".publish-{uuid.uuid4().hex}.tmp"
+    created=[];temporaries=[];source_hashes={};failed=False;failure_exception=None;operation="validate absolute publication path lengths";active_source,active_destination=pairs[0];active_temp=PUBLICATION_TEMP_DIR/"p00000000.tmp"
     try:
         for source,target in pairs:
-            active_source,active_destination,active_temp=source,target,destination/f".publish-{uuid.uuid4().hex}.tmp"
+            active_source,active_destination,active_temp=source,target,PUBLICATION_TEMP_DIR/"p00000000.tmp"
             candidate_paths={"source":source,"destination":target,"temporary":active_temp,"destination_directory":destination}
             too_long={kind:len(_absolute(path)) for kind,path in candidate_paths.items() if len(_absolute(path))>MAX_PUBLICATION_PATH_CHARS}
             if too_long:raise OSError(f"Caminho absoluto perigosamente longo; limite preventivo {MAX_PUBLICATION_PATH_CHARS} caracteres; comprimentos excedidos={too_long}")
@@ -142,8 +143,10 @@ def publish(root:Path,data:PolicyData,policy:Path,bill:Path,return_created:bool=
             if legacy_paths_safe and all(path.is_file() for path in legacy_targets) and all(sha256(path)==source_hashes[source] for (source,_),path in zip(pairs,legacy_targets)):
                 logger.info("Par documental idêntico já publicado com os nomes legados; preservando arquivos sem renomear: %s",[ _absolute(path) for path in legacy_targets])
                 return (destination,created) if return_created else destination
+        operation="create project publication temporary directory"
+        PUBLICATION_TEMP_DIR.mkdir(parents=True,exist_ok=True)
         for source,target in pairs:
-            active_source,active_destination,active_temp=source,target,destination/f".publish-{uuid.uuid4().hex}.tmp"
+            active_source,active_destination,active_temp=source,target,PUBLICATION_TEMP_DIR/"p00000000.tmp"
             operation="check existing destination"
             if target.exists():
                 if sha256(target)==source_hashes[source]:continue
@@ -152,17 +155,23 @@ def publish(root:Path,data:PolicyData,policy:Path,bill:Path,return_created:bool=
             if not source.is_file():raise FileNotFoundError(f"PDF de origem desapareceu antes da cópia: {_absolute(source)}")
             if not destination.is_dir() or not os.access(destination,os.W_OK):
                 raise FileNotFoundError(f"Diretório de destino desapareceu ou ficou inacessível antes da cópia: {_absolute(destination)}")
-            # Um nome curto e exclusivo evita colisões entre execuções e reduz riscos
-            # de sincronizadores disputarem o mesmo arquivo .tmp determinístico.
-            temporaries.append(active_temp)
+            # O temporário fica em uma raiz curta no projeto, não dentro do destino.
+            # mkstemp reserva nome exclusivo curto, inclusive em execuções concorrentes.
+            descriptor,temp_name=tempfile.mkstemp(prefix="p",suffix=".tmp",dir=PUBLICATION_TEMP_DIR)
+            active_temp=Path(temp_name);temporaries.append(active_temp)
+            os.close(descriptor)
+            if len(_absolute(active_temp))>MAX_PUBLICATION_PATH_CHARS:
+                raise OSError(f"Caminho absoluto do temporário excede o limite preventivo {MAX_PUBLICATION_PATH_CHARS}: {_absolute(active_temp)}")
             operation="shutil.copy2 source PDF to temporary file"
             shutil.copy2(source,active_temp)
             operation="verify temporary PDF hash"
             if sha256(active_temp)!=source_hashes[source]:raise OSError(f"Hash do temporário não corresponde à origem: {_absolute(active_temp)}")
-            operation="atomically replace temporary PDF with destination"
-            os.replace(active_temp,target)
-            temporaries.remove(active_temp)
+            operation="shutil.copy2 temporary PDF to destination"
+            if target.exists():
+                if sha256(target)==source_hashes[source]:continue
+                raise FileExistsError(f"Destino existente possui conteúdo diferente: {_absolute(target)}")
             created.append(target)
+            shutil.copy2(active_temp,target)
             operation="verify published PDF hash"
             if sha256(target)!=source_hashes[source]:raise OSError(f"Hash do PDF publicado não corresponde à origem: {_absolute(target)}")
     except (KeyboardInterrupt,SystemExit) as exc:
