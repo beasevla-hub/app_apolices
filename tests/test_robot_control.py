@@ -18,9 +18,9 @@ def test_attempt_history_is_audit_only_and_success_clears_error(tmp_path):
 
 def test_completed_pair_requires_success_and_both_exact_hashes(tmp_path):
     ctl=RobotControl(tmp_path/'robot.xlsx',max_attempts=1)
-    ctl.record(message_id='m1',uid='1',group_key='PAIR-a',lote='01',status='SUCESSO',tentativas=100,hash_apolice='policy',hash_boleto='bill')
+    ctl.record(message_id='m1',uid='1',group_key='PAIR-a',lote='01',status='SUCESSO',tentativas=100,hash_apolice='policy',hash_boleto='bill',pasta_destino=r'C:\docs\01. APOLICE - ORGAO - 01-2026.pdf')
     row=ctl.completed_pair('m1','PAIR-a','policy','bill',lot='01')
-    assert row and row['status']=='SUCESSO'
+    assert row and row['status']=='SUCESSO' and '01. APOLICE - ORGAO' in row['pasta_destino']
     assert ctl.completed_pair('m1','PAIR-a','changed','bill',lot='01') is None
     assert ctl.completed_pair('m1','PAIR-a','policy','different',lot='01') is None
     assert ctl.completed_pair('m1','PAIR-a','bill','policy',lot='01') is None

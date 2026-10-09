@@ -12,6 +12,8 @@ from .models import PolicyData
 INVALID=re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 logger=logging.getLogger("robo_apolices")
 SYNC_MARKERS=("onedrive","sharepoint","dropbox","google drive","googledrive","icloud","syncthing","sync.com")
+# Mantém margem antes do limite clássico de 260 caracteres do Windows.
+MAX_PUBLICATION_PATH_CHARS=240
 
 
 def sanitize_filename(name:str)->str:
@@ -33,6 +35,11 @@ def lot_label(lot:str|None,unknown_group:str|None=None)->str|None:
 
 
 def build_document_names(data:PolicyData,multiple_lots:bool=False,group_label:str|None=None)->tuple[str,str]:
+    return "01. APOLICE.pdf","08. BOLETO.pdf"
+
+
+def _legacy_document_names(data:PolicyData,multiple_lots:bool=False,group_label:str|None=None)->tuple[str,str]:
+    """Nomes anteriores, usados só para reconhecer um par já publicado; nunca são criados."""
     org=sanitize_filename(data.orgao_normalizado or data.orgao or "ORGAO")
     number=sanitize_filename(data.numero_concorrencia_normalizado or "CONCORRENCIA-NAO-INFORMADA")
     suffix=lot_label(data.lote_operacional,group_label) if multiple_lots else None
@@ -80,6 +87,8 @@ def _diagnostic(operation:str,source:Path|None,destination:Path|None,temp:Path|N
         "path_lengths_characters":lengths,
         "path_components":components,
         "path_component_lengths":component_lengths,
+        "dangerous_path_limit_characters":MAX_PUBLICATION_PATH_CHARS,
+        "paths_over_limit":{key:length for key,length in lengths.items() if length is not None and length>MAX_PUBLICATION_PATH_CHARS},
         "source_exists":_safe_exists(source),
         "source_is_file":(source.is_file() if source is not None and _safe_exists(source) else False if source is not None else None),
         "source_read_access":(os.access(source,os.R_OK) if source is not None else None),
@@ -108,20 +117,36 @@ def publish(root:Path,data:PolicyData,policy:Path,bill:Path,return_created:bool=
     destination=build_destination(root,data,multiple_lots,group_label)
     policy_name,bill_name=build_document_names(data,multiple_lots,group_label)
     pairs=[(Path(policy),destination/policy_name),(Path(bill),destination/bill_name)]
-    created=[];temporaries=[];failed=False;failure_exception=None;operation="create destination directory";active_source,active_destination=pairs[0];active_temp=destination/f".publish-{uuid.uuid4().hex}.tmp"
+    created=[];temporaries=[];source_hashes={};failed=False;failure_exception=None;operation="validate absolute publication path lengths";active_source,active_destination=pairs[0];active_temp=destination/f".publish-{uuid.uuid4().hex}.tmp"
     try:
-        destination.mkdir(parents=True,exist_ok=True)
-        if not destination.is_dir() or not os.access(destination,os.W_OK):
-            raise PermissionError(f"Diretório de destino não existe, não é diretório ou não permite gravação: {_absolute(destination)}")
         for source,target in pairs:
             active_source,active_destination,active_temp=source,target,destination/f".publish-{uuid.uuid4().hex}.tmp"
+            candidate_paths={"source":source,"destination":target,"temporary":active_temp,"destination_directory":destination}
+            too_long={kind:len(_absolute(path)) for kind,path in candidate_paths.items() if len(_absolute(path))>MAX_PUBLICATION_PATH_CHARS}
+            if too_long:raise OSError(f"Caminho absoluto perigosamente longo; limite preventivo {MAX_PUBLICATION_PATH_CHARS} caracteres; comprimentos excedidos={too_long}")
             operation="validate source PDF"
             if not source.is_file():raise FileNotFoundError(f"PDF de origem não existe ou não é arquivo: {_absolute(source)}")
             operation="hash source PDF"
             source_hash=sha256(source)
+            source_hashes[source]=source_hash
+        operation="create destination directory"
+        destination.mkdir(parents=True,exist_ok=True)
+        if not destination.is_dir() or not os.access(destination,os.W_OK):
+            raise PermissionError(f"Diretório de destino não existe, não é diretório ou não permite gravação: {_absolute(destination)}")
+        targets=[target for _,target in pairs]
+        if not any(target.exists() for target in targets):
+            legacy_names=_legacy_document_names(data,multiple_lots,group_label)
+            legacy_targets=[destination/name for name in legacy_names]
+            legacy_paths_safe=all(len(_absolute(path))<=MAX_PUBLICATION_PATH_CHARS for path in legacy_targets)
+            operation="check previously published legacy pair"
+            if legacy_paths_safe and all(path.is_file() for path in legacy_targets) and all(sha256(path)==source_hashes[source] for (source,_),path in zip(pairs,legacy_targets)):
+                logger.info("Par documental idêntico já publicado com os nomes legados; preservando arquivos sem renomear: %s",[ _absolute(path) for path in legacy_targets])
+                return (destination,created) if return_created else destination
+        for source,target in pairs:
+            active_source,active_destination,active_temp=source,target,destination/f".publish-{uuid.uuid4().hex}.tmp"
             operation="check existing destination"
             if target.exists():
-                if sha256(target)==source_hash:continue
+                if sha256(target)==source_hashes[source]:continue
                 raise FileExistsError(f"Destino existente possui conteúdo diferente: {_absolute(target)}")
             operation="validate source immediately before copy"
             if not source.is_file():raise FileNotFoundError(f"PDF de origem desapareceu antes da cópia: {_absolute(source)}")
@@ -133,13 +158,13 @@ def publish(root:Path,data:PolicyData,policy:Path,bill:Path,return_created:bool=
             operation="shutil.copy2 source PDF to temporary file"
             shutil.copy2(source,active_temp)
             operation="verify temporary PDF hash"
-            if sha256(active_temp)!=source_hash:raise OSError(f"Hash do temporário não corresponde à origem: {_absolute(active_temp)}")
+            if sha256(active_temp)!=source_hashes[source]:raise OSError(f"Hash do temporário não corresponde à origem: {_absolute(active_temp)}")
             operation="atomically replace temporary PDF with destination"
             os.replace(active_temp,target)
             temporaries.remove(active_temp)
             created.append(target)
             operation="verify published PDF hash"
-            if sha256(target)!=source_hash:raise OSError(f"Hash do PDF publicado não corresponde à origem: {_absolute(target)}")
+            if sha256(target)!=source_hashes[source]:raise OSError(f"Hash do PDF publicado não corresponde à origem: {_absolute(target)}")
     except (KeyboardInterrupt,SystemExit) as exc:
         failed=True
         failure_exception=exc

@@ -88,7 +88,7 @@ def test_publish_idempotent_and_conflict_rolls_back(tmp_path):
     p=tmp_path/'p.pdf';b=tmp_path/'b.pdf';make_pdf(p);make_pdf(b)
     dest,created=publish(tmp_path/'root',data(),p,b,return_created=True);assert len(created)==2
     dest2,created2=publish(tmp_path/'root',data(),p,b,return_created=True);assert dest==dest2 and not created2
-    (dest/'08. BOLETO - ORGAO X - 01-2026.pdf').write_bytes(b'different')
+    (dest/'08. BOLETO.pdf').write_bytes(b'different')
     with pytest.raises(FileExistsError):publish(tmp_path/'root',data(),p,b)
 
 def test_process_message_integration_mocked(tmp_path):

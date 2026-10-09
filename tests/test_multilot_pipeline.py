@@ -50,7 +50,9 @@ def test_two_lots_random_order_other_file_and_resume_only_failed_group_without_f
     ws=load_workbook(excel)['APÓLICES'];lot_col=next(c for c in range(1,ws.max_column+1) if ws.cell(1,c).value=='LOTE')
     assert {ws.cell(r,lot_col).value for r in range(2,ws.max_row+1)}=={'01','02'}
     folders=[p.name for p in (tmp_path/'docs'/'THI').rglob('LOTE *') if p.is_dir()]
-    assert set(folders)=={'LOTE 01','LOTE 02'} and len(list((tmp_path/'docs').rglob('*.pdf')))==4
+    published=list((tmp_path/'docs').rglob('*.pdf'))
+    assert set(folders)=={'LOTE 01','LOTE 02'} and len(published)==4
+    assert {path.name for path in published}=={'01. APOLICE.pdf','08. BOLETO.pdf'}
     email_row=control.find(message.message_id,message.uid)
     metadata=json.loads((tmp_path/'history'/email_row['id_processamento']/'metadata.json').read_text())
     assert metadata['quantidade_pdfs']==5 and metadata['quantidade_grupos']==2
@@ -74,7 +76,8 @@ def test_ten_groups_make_ten_separate_analyses(tmp_path):
     status,control,excel,counting=run_process(tmp_path,message,GroupClient(groups))
     assert status=='SUCESSO' and counting.classifications==1 and counting.analyses==10
     assert load_workbook(excel)['APÓLICES'].max_row==11
-    assert len(list((tmp_path/'docs').rglob('*.pdf')))==20
+    published=list((tmp_path/'docs').rglob('*.pdf'))
+    assert len(published)==20 and {path.name for path in published}=={'01. APOLICE.pdf','08. BOLETO.pdf'}
 
 def test_cross_lot_pair_rejected_by_independent_analysis(tmp_path):
     names=['policy_01.pdf','bill_01.pdf','policy_02.pdf','bill_02.pdf']

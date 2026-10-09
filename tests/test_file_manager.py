@@ -7,7 +7,10 @@ from app.file_manager import sanitize_filename,sha256,build_destination,build_do
 def policy():return PolicyData(empresa_normalizada='THI',orgao='Órgão',orgao_normalizado='ORGAO',numero_concorrencia_normalizado='01-2026',vigencia_data_inicial=date(2026,8,1),vigencia_data_final=date(2027,8,1),confianca_geral=.9)
 def test_deterministic_paths_names_hash_and_sanitization(tmp_path):
     d=policy();assert build_destination(tmp_path,d)==build_destination(tmp_path,d)
-    assert build_document_names(d)==build_document_names(d)
+    assert build_document_names(d)==("01. APOLICE.pdf","08. BOLETO.pdf")
+    assert build_document_names(d,True,"LOTE 02")==("01. APOLICE.pdf","08. BOLETO.pdf")
+    lot_destination=build_destination(tmp_path,d,True,"LOTE 02")
+    assert lot_destination.name=="LOTE 02" and lot_destination.parent==build_destination(tmp_path,d)
     assert sanitize_filename('a/b')=='a-b'
     f=tmp_path/'doc.pdf';f.write_bytes(b'abc');assert len(sha256(f))==64
 
@@ -15,7 +18,7 @@ def test_publish_identical_pdf_idempotent_and_conflict(tmp_path):
     p=tmp_path/'p.pdf';b=tmp_path/'b.pdf';p.write_bytes(b'policy');b.write_bytes(b'bill')
     first,created=publish(tmp_path/'root',policy(),p,b,return_created=True);assert len(created)==2
     _,created=publish(tmp_path/'root',policy(),p,b,return_created=True);assert not created
-    (first/'08. BOLETO - ORGAO - 01-2026.pdf').write_bytes(b'other')
+    (first/'08. BOLETO.pdf').write_bytes(b'other')
     with pytest.raises(FileExistsError):publish(tmp_path/'root',policy(),p,b)
 
 
@@ -128,3 +131,31 @@ def test_publish_os_replace_failure_on_second_pdf_rolls_back_pair_and_tmp(tmp_pa
     destination,policy_target,bill_target=_published_paths(root,data)
     assert not policy_target.exists() and not bill_target.exists()
     assert not list(destination.glob('*.tmp'))
+
+
+def test_publish_rejects_dangerously_long_paths_before_copy_or_replace(tmp_path,monkeypatch,caplog):
+    import app.file_manager as manager
+    data=policy();source_policy,source_bill=_publish_fixture(tmp_path)
+    root=tmp_path/('r'*80)/('s'*80)
+    monkeypatch.setattr(manager.shutil,'copy2',lambda *args,**kwargs:pytest.fail('não deve copiar caminho longo'))
+    monkeypatch.setattr(manager.os,'replace',lambda *args,**kwargs:pytest.fail('não deve chamar os.replace para caminho longo'))
+    with pytest.raises(OSError,match='Caminho absoluto perigosamente longo') as caught:
+        publish(root,data,source_policy,source_bill)
+    diagnostic=' '.join(getattr(caught.value,'__notes__',[]))
+    assert 'dangerous_path_limit_characters' in diagnostic and 'paths_over_limit' in diagnostic
+    assert 'validate absolute publication path lengths' in caplog.text
+    assert not root.exists()
+
+
+@pytest.mark.parametrize(('multiple_lots','group_label','legacy_suffix'),[(False,None,''),(True,'LOTE 02',' - LOTE 02')])
+def test_publish_recognizes_old_named_pair_without_renaming_or_deleting(tmp_path,multiple_lots,group_label,legacy_suffix):
+    data=policy();source_policy,source_bill=_publish_fixture(tmp_path);root=tmp_path/'docs'
+    destination=build_destination(root,data,multiple_lots,group_label);destination.mkdir(parents=True)
+    old_base=f'ORGAO - 01-2026{legacy_suffix}'
+    old_policy=destination/f'01. APOLICE - {old_base}.pdf'
+    old_bill=destination/f'08. BOLETO - {old_base}.pdf'
+    old_policy.write_bytes(source_policy.read_bytes());old_bill.write_bytes(source_bill.read_bytes())
+    result,created=publish(root,data,source_policy,source_bill,return_created=True,multiple_lots=multiple_lots,group_label=group_label)
+    assert result==destination and created==[]
+    assert old_policy.exists() and old_bill.exists()
+    assert not (destination/'01. APOLICE.pdf').exists() and not (destination/'08. BOLETO.pdf').exists()
