@@ -11,7 +11,7 @@ def workbook(path,rows):
     wb=Workbook();ws=wb.active;ws.title='APÓLICES';ws.append(ROBOT_MANAGED_COLUMNS+['STATUS','RESPONSÁVEL'])
     for row in rows:ws.append(row)
     wb.save(path)
-def row(process):return ['Sub Parelheiros','THI Engenharia','018/SEME/2026',process,'manual objeto',None,None,None,None,None,None,'PAGO','Bea']
+def row(process):return ['Sub Parelheiros','THI Engenharia','018/SEME/2026',process,'manual objeto',None,None,None,None,None,None,None,'PAGO','Bea']
 def test_different_sei_does_not_fallback_to_org(tmp_path):
     path=tmp_path/'ops.xlsx';workbook(path,[row('SEI-1')])
     assert update_workbook(path,item('SEI-2'),tmp_path/'backups')=='ADICIONADO'
@@ -19,7 +19,7 @@ def test_different_sei_does_not_fallback_to_org(tmp_path):
 def test_same_sei_updates_preserves_manual_and_null(tmp_path):
     path=tmp_path/'ops.xlsx';workbook(path,[row('SEI-1')])
     update_workbook(path,item('SEI-1'),tmp_path/'backups');ws=load_workbook(path)['APÓLICES']
-    assert ws.max_row==2 and ws['L2'].value=='PAGO' and ws['M2'].value=='Bea' and ws['E2'].value=='manual objeto'
+    assert ws.max_row==2 and ws['M2'].value=='PAGO' and ws['N2'].value=='Bea' and ws['E2'].value=='manual objeto'
 def test_missing_operational_sheet_fails_without_changing_other_sheet(tmp_path):
     path=tmp_path/'ops.xlsx';wb=Workbook();wb.active.title='Outra';wb.save(path)
     with pytest.raises(ValueError,match='APÓLICES'):update_workbook(path,item(),tmp_path/'backups')
@@ -58,7 +58,7 @@ def test_missing_lot_column_is_added_once_and_two_lots_are_distinct(tmp_path):
     path=tmp_path/'no-lot.xlsx';headers=[h for h in ROBOT_MANAGED_COLUMNS if h!='LOTE']+['STATUS']
     wb=Workbook();ws=wb.active;ws.title='APÓLICES';ws.append(headers)
     # A pre-existing record without a lote remains untouched when another lote arrives.
-    values=['Sub Parelheiros','THI Engenharia','018/SEME/2026','SEI-1',None,None,None,None,None,None,'PAGO'];ws.append(values);wb.save(path)
+    values=['Sub Parelheiros','THI Engenharia','018/SEME/2026','SEI-1',None,None,None,None,None,None,None,'PAGO'];ws.append(values);wb.save(path)
     update_workbook(path,item('SEI-1','01'),tmp_path/'backups')
     ws=load_workbook(path)['APÓLICES'];lot_col=next(c for c in range(1,ws.max_column+1) if str(ws.cell(1,c).value).strip().casefold()=='lote')
     assert ws.max_row==3 and ws.cell(2,lot_col).value is None and ws.cell(3,lot_col).value=='01'
@@ -72,3 +72,14 @@ def test_missing_incoming_sei_does_not_fallback_to_row_with_known_sei(tmp_path):
     ws=load_workbook(path)['APÓLICES']
     assert result=='ADICIONADO' and ws.max_row==3
     assert ws['D2'].value=='SEI-EXISTENTE' and ws['D3'].value is None
+
+def test_received_datetime_is_appended_after_legacy_manual_columns_without_shifting_them(tmp_path):
+    from datetime import datetime
+    legacy_columns=[column for column in ROBOT_MANAGED_COLUMNS if column!='DATA DE RECEBIMENTO DO E-MAIL']
+    path=tmp_path/'legacy.xlsx';wb=Workbook();ws=wb.active;ws.title='APÓLICES';ws.append(legacy_columns+['STATUS','RESPONSÁVEL'])
+    ws.append(['Sub Parelheiros','THI Engenharia','018/SEME/2026','SEI-1','manual objeto',None,None,None,None,None,'01','PAGO','Bea']);wb.save(path)
+    update_workbook(path,item('SEI-1','01'),tmp_path/'backups',email_received_at='2026-10-09T11:31:42+00:00')
+    ws=load_workbook(path)['APÓLICES'];headers={ws.cell(1,c).value:c for c in range(1,ws.max_column+1)}
+    received=ws.cell(2,headers['DATA DE RECEBIMENTO DO E-MAIL'])
+    assert ws.max_row==2 and ws['L2'].value=='PAGO' and ws['M2'].value=='Bea'
+    assert received.value==datetime(2026,10,9,8,31,42) and received.number_format=='dd/mm/yyyy hh:mm:ss'

@@ -10,6 +10,13 @@ class Evidence(BaseModel):
     valor:Any=None
     fonte:Source="NAO_IDENTIFICADO"
     confianca:float=Field(default=0,ge=0,le=1)
+
+class PolicyLot(BaseModel):
+    """Lote extraído da apólice e eventual prêmio individual explicitamente associado."""
+    model_config=ConfigDict(extra="forbid")
+    numero:Evidence
+    valor_premio:Evidence=Field(default_factory=Evidence)
+
 class PolicyData(BaseModel):
     model_config=ConfigDict(extra="forbid")
     empresa:str|None=None
@@ -23,6 +30,8 @@ class PolicyData(BaseModel):
     processo_sei:str|None=None
     lote:str|None=None
     lote_associado:str|None=None
+    lotes_associados:list[str]=Field(default_factory=list)
+    lotes:list[PolicyLot]=Field(default_factory=list)
     par_coerente:bool|None=None
     objeto:str|None=None
     vigencia_data_inicial:date|None=None
@@ -65,7 +74,9 @@ class PolicyData(BaseModel):
     @property
     def lote_operacional(self)->str|None:
         """Lote para organização operacional, sem alterar o dado documental extraído."""
-        return self.lote_associado if self.lote_associado is not None else self.lote
+        if self.lote_associado is not None:return self.lote_associado
+        if len(self.lotes_associados)==1:return self.lotes_associados[0]
+        return self.lote
     @property
     def lote_documental(self)->str|None:
         """Identificador de lote efetivamente retornado pela extração documental."""

@@ -16,7 +16,7 @@ def data(**kw):
     base=dict(empresa="THI Engenharia",empresa_normalizada="THI",tipo_empresa="THI",orgao="Órgão X",orgao_normalizado="ORGAO X",numero_concorrencia_original="01/2026",numero_concorrencia_normalizado="01-2026",vigencia_data_inicial=date(2026,1,2),vigencia_data_final=date(2027,1,1),confianca_geral=.95)
     base.update(kw);return PolicyData(**base)
 def raw_result(**changes):
-    fields={"empresa":{"valor":"THI ENGENHARIA E ARQUITETURA LTDA","fonte":"APOLICE","confianca":.98},"empresa_normalizada":{"valor":"THI","fonte":"APOLICE","confianca":.99},"cnpj":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.1},"orgao":{"valor":"Órgão X","fonte":"APOLICE","confianca":.95},"orgao_normalizado":"ORGAO X","numero_concorrencia_original":{"valor":"01/2026","fonte":"APOLICE","confianca":.95},"numero_concorrencia_normalizado":{"valor":"01-2026","fonte":"APOLICE","confianca":.95},"processo_sei":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.1},"lote":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.1},"par_coerente":True,"objeto":{"valor":"Seguro","fonte":"APOLICE","confianca":.9},"vigencia_data_inicial":{"valor":"2026-01-02","fonte":"APOLICE","confianca":.98},"vigencia_data_final":{"valor":"2027-01-01","fonte":"APOLICE","confianca":.98},"valor_premio":{"valor":1234.56,"fonte":"APOLICE","confianca":.95},"numero_registro_susep":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.2},"linha_digitavel_boleto":{"valor":"12345","fonte":"BOLETO","confianca":.95},"tipo_empresa":"THI","nome_pasta":None,"nome_apolice":None,"nome_boleto":None,"confianca_geral":.95,"campos_com_duvida":["processo_sei","numero_registro_susep"],"observacoes":None}
+    fields={"empresa":{"valor":"THI ENGENHARIA E ARQUITETURA LTDA","fonte":"APOLICE","confianca":.98},"empresa_normalizada":{"valor":"THI","fonte":"APOLICE","confianca":.99},"cnpj":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.1},"orgao":{"valor":"Órgão X","fonte":"APOLICE","confianca":.95},"orgao_normalizado":"ORGAO X","numero_concorrencia_original":{"valor":"01/2026","fonte":"APOLICE","confianca":.95},"numero_concorrencia_normalizado":{"valor":"01-2026","fonte":"APOLICE","confianca":.95},"processo_sei":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.1},"lote":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.1},"lotes":[],"par_coerente":True,"objeto":{"valor":"Seguro","fonte":"APOLICE","confianca":.9},"vigencia_data_inicial":{"valor":"2026-01-02","fonte":"APOLICE","confianca":.98},"vigencia_data_final":{"valor":"2027-01-01","fonte":"APOLICE","confianca":.98},"valor_premio":{"valor":1234.56,"fonte":"APOLICE","confianca":.95},"numero_registro_susep":{"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":.2},"linha_digitavel_boleto":{"valor":"12345","fonte":"BOLETO","confianca":.95},"tipo_empresa":"THI","nome_pasta":None,"nome_apolice":None,"nome_boleto":None,"confianca_geral":.95,"campos_com_duvida":["processo_sei","numero_registro_susep"],"observacoes":None}
     fields.update(changes);return fields
 
 def make_pdf(path:Path):
@@ -96,14 +96,14 @@ def test_process_message_integration_mocked(tmp_path):
     em=EmailMessage();em['From']='Finlandia <operacao@finlandiaseguros.com.br>';em['To']='robot@example.com';em['Subject']='Documentos';em['Message-ID']='<m-1>';em.set_content('Segue documentação')
     em.add_attachment(policy.read_bytes(),maintype='application',subtype='pdf',filename='apolice.pdf');em.add_attachment(bill.read_bytes(),maintype='application',subtype='pdf',filename='boleto.pdf')
     msg=MailMessage('1','<m-1>','Finlandia <operacao@finlandiaseguros.com.br>','Documentos','2026-01-01',em.as_bytes())
-    ops=tmp_path/'ops.xlsx';wb=Workbook();ws=wb.active;ws.title='APÓLICES';ws.append(ROBOT_MANAGED_COLUMNS+['STATUS']);ws.append(['Órgão X','THI Engenharia','01/2026',None,None,None,None,None,None,None,None,'PAGO']);wb.save(ops)
+    ops=tmp_path/'ops.xlsx';wb=Workbook();ws=wb.active;ws.title='APÓLICES';ws.append(ROBOT_MANAGED_COLUMNS+['STATUS']);ws.append(['Órgão X','THI Engenharia','01/2026',None,None,None,None,None,None,None,None,None,'PAGO']);wb.save(ops)
     class FakeClient:
         def classify(self,files,names):return {'grupos':[{'lote':{'valor':None,'fonte':'NAO_IDENTIFICADO','confianca':.1},'apolice':'apolice.pdf','boleto':'boleto.pdf'}],'outros':[],'observacoes':None}
         def analyze(self,policy_path,bill_path):return raw_result()
     ctl=RobotControl(tmp_path/'control.xlsx')
     status=process_message(msg,ctl,client=FakeClient(),root_dir=tmp_path/'docs',policies_excel=ops,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history')
     assert status=='SUCESSO';record=ctl.find('<m-1>');assert record['status']=='SUCESSO' and record['id_processamento']
-    ws=load_workbook(ops)['APÓLICES'];assert ws['L2'].value=='PAGO' and ws['D2'].value is None
+    ws=load_workbook(ops)['APÓLICES'];assert ws['M2'].value=='PAGO' and ws['D2'].value is None
     assert (tmp_path/'history'/record['id_processamento']/'resultado.json').exists()
     assert len(list((tmp_path/'docs').rglob('*.pdf')))==2
 
@@ -112,7 +112,7 @@ def test_openrouter_sends_schema_and_parses_mocked_response(tmp_path,monkeypatch
     import json
     from types import SimpleNamespace
     from app.openrouter_client import OpenRouterClient
-    from app.prompt import POLICY_SCHEMA
+    from app.prompt import POLICY_SCHEMA,ROLE_SCHEMA
     calls={}
     def fake_post(url,**kwargs):
         calls.update(kwargs)
@@ -125,6 +125,10 @@ def test_openrouter_sends_schema_and_parses_mocked_response(tmp_path,monkeypatch
     schema=calls['json']['response_format']['json_schema']['schema']
     assert schema['properties']['processo_sei']['properties']['fonte']['enum']==['APOLICE','BOLETO','AMBOS','NAO_IDENTIFICADO']
     assert schema['properties']['cnpj']['properties']['valor']['type']==['string','null']
+    assert 'lotes' in schema['required'] and schema['properties']['lotes']['items']['required']==['numero','valor_premio']
+    assert schema['properties']['lotes']['items']['properties']['valor_premio']['properties']['valor']['type']==['string','number','null']
+    group_schema=ROLE_SCHEMA['properties']['grupos']['items']
+    assert 'lotes' in group_schema['required'] and group_schema['properties']['lotes']['items']['properties']['valor']['type']==['string','number','null']
     assert calls['headers']['HTTP-Referer']=='https://github.com/beasevla-hub/app_apolices'
     assert 'manus.im' not in str(calls['headers']).lower()
     assert 'dummy-secret' not in str(calls['json'])

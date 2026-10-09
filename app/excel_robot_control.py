@@ -2,10 +2,10 @@
 from pathlib import Path
 from datetime import datetime
 from uuid import uuid4
-import os
+import os,json
 from openpyxl import Workbook,load_workbook
 from openpyxl.styles import Font,PatternFill
-HEADERS=["message_id","uid","group_key","lote","data_email","remetente","assunto","hash_apolice","hash_boleto","status","tentativas","modelo_ia","data_ultima_tentativa","data_processamento","erro","pasta_destino","id_processamento"]
+HEADERS=["message_id","uid","group_key","lote","lotes","data_email","remetente","assunto","hash_apolice","hash_boleto","status","tentativas","modelo_ia","data_ultima_tentativa","data_processamento","erro","pasta_destino","id_processamento"]
 class RobotControl:
     def __init__(self,path:Path,max_attempts:int=5):self.path=Path(path);self.max_attempts=max_attempts
     def _open(self):
@@ -30,7 +30,7 @@ class RobotControl:
     def _group_matches(row,group_key):return (row.get("group_key") or "")== (group_key or "")
     def find(self,message_id:str,uid:str="",group_key:str|None=None):
         return next((row for row in self.rows() if ((message_id and row.get("message_id")==message_id) or (uid and str(row.get("uid"))==str(uid))) and self._group_matches(row,group_key)),None)
-    def completed_pair(self,message_id:str,group_key:str,policy_hash:str,bill_hash:str,lot:str|None=None):
+    def completed_pair(self,message_id:str,group_key:str,policy_hash:str,bill_hash:str,lot:str|None=None,lotes:list[str]|None=None):
         """Retorna somente SUCESSO com os dois hashes exatos; status/tentativas não são gates."""
         completed=[row for row in self.rows() if row.get("status")=="SUCESSO" and row.get("hash_apolice")==policy_hash and row.get("hash_boleto")==bill_hash]
         def normalize(value):
@@ -38,6 +38,13 @@ class RobotControl:
             return (text[5:].strip() if text.startswith("lote ") else text) or None
         requested=normalize(lot)
         compatible=[row for row in completed if requested is None or normalize(row.get("lote"))==requested]
+        if lotes:
+            expected={normalize(value) for value in lotes}
+            compatible=[]
+            for row in completed:
+                try:recorded=json.loads(row.get("lotes") or "[]")
+                except (TypeError,ValueError):recorded=[]
+                if {normalize(value) for value in recorded}==expected:compatible.append(row)
         exact=next((row for row in compatible if row.get("message_id")==message_id and (row.get("group_key") or "")==group_key),None)
         return exact or next(iter(compatible),None)
     def attempts(self,message_id:str,uid:str="",group_key:str|None=None)->int:

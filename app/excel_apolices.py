@@ -1,13 +1,16 @@
 """Atualização do Excel operacional sem reconfigurar layout humano existente."""
 from pathlib import Path
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 import os,shutil,unicodedata
+from zoneinfo import ZoneInfo
 from copy import copy
 from openpyxl import Workbook,load_workbook
 from openpyxl.styles import Font,PatternFill
 from openpyxl.worksheet.table import Table,TableStyleInfo
 from .models import PolicyData
-ROBOT_MANAGED_COLUMNS=["ÓRGÃO","EMPRESA","Nº CONCORRÊNCIA/EDITAL","PROCESSO SEI","OBJETO","VIGÊNCIA DATA INICIAL","VIGÊNCIA DATA FINAL","VALOR DO PRÊMIO","Nº REGISTRO DA SUSEP","Nº DA LINHA DIGITÁVEL DO BOLETO","LOTE"]
+from .config import settings
+ROBOT_MANAGED_COLUMNS=["ÓRGÃO","EMPRESA","Nº CONCORRÊNCIA/EDITAL","PROCESSO SEI","OBJETO","VIGÊNCIA DATA INICIAL","VIGÊNCIA DATA FINAL","VALOR DO PRÊMIO","Nº REGISTRO DA SUSEP","Nº DA LINHA DIGITÁVEL DO BOLETO","LOTE","DATA DE RECEBIMENTO DO E-MAIL"]
 SHEET_NAME="APÓLICES"
 HEADER_ALIASES={
  "ÓRGÃO":("ÓRGÃO","ORGAO","NOME DO ORGAO","ORGAO CONTRATANTE"),
@@ -20,7 +23,8 @@ HEADER_ALIASES={
  "VALOR DO PRÊMIO":("VALOR DO PRÊMIO","VALOR PREMIO","PREMIO","VALOR DO SEGURO"),
  "Nº REGISTRO DA SUSEP":("Nº REGISTRO DA SUSEP","NUMERO REGISTRO SUSEP","REGISTRO SUSEP","SUSEP"),
  "Nº DA LINHA DIGITÁVEL DO BOLETO":("Nº DA LINHA DIGITÁVEL DO BOLETO","LINHA DIGITAVEL DO BOLETO","LINHA DIGITAVEL BOLETO","LINHA DIGITAVEL","CODIGO DE BARRAS"),
- "LOTE":("LOTE","Nº LOTE","Nº DO LOTE","NUMERO DO LOTE","NÚMERO DO LOTE","NUMERO LOTE")}
+ "LOTE":("LOTE","Nº LOTE","Nº DO LOTE","NUMERO DO LOTE","NÚMERO DO LOTE","NUMERO LOTE"),
+ "DATA DE RECEBIMENTO DO E-MAIL":("DATA DE RECEBIMENTO DO E-MAIL","DATA RECEBIMENTO DO EMAIL","DATA DO RECEBIMENTO DO EMAIL","RECEBIDO EM")}
 def backup_file(path:Path,backup_dir:Path)->Path|None:
     if not path.exists():return None
     backup_dir.mkdir(parents=True,exist_ok=True);dest=backup_dir/f"controle_apolices_{datetime.now():%Y%m%d_%H%M%S_%f}.xlsx";shutil.copy2(path,dest);return dest
@@ -59,7 +63,20 @@ def _available_row(ws)->int:
     for row in range(2,ws.max_row+1):
         if all(ws.cell(row,col).value is None for col in range(1,ws.max_column+1)):return row
     return ws.max_row+1
-def update_workbook(path:Path,data:PolicyData,backup_dir:Path)->str:
+def _email_received_datetime(value):
+    if value in (None,""):return None
+    target_zone=ZoneInfo(settings.email_timezone)
+    if isinstance(value,datetime):parsed=value
+    else:
+        text=str(value).strip()
+        try:parsed=datetime.fromisoformat(text.replace("Z","+00:00"))
+        except ValueError:
+            try:parsed=parsedate_to_datetime(text)
+            except (TypeError,ValueError,OverflowError) as exc:raise ValueError(f"Data/hora de recebimento do e-mail inválida: {value!r}") from exc
+    if parsed.tzinfo is None:parsed=parsed.replace(tzinfo=target_zone)
+    return parsed.astimezone(target_zone).replace(tzinfo=None)
+
+def update_workbook(path:Path,data:PolicyData,backup_dir:Path,email_received_at=None)->str:
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True);is_new=not path.exists()
     if not is_new:
         backup_file(path,backup_dir);wb=load_workbook(path)
@@ -70,15 +87,17 @@ def update_workbook(path:Path,data:PolicyData,backup_dir:Path)->str:
         for cell in ws[1]:cell.font=Font(bold=True,color="FFFFFF");cell.fill=PatternFill("solid",fgColor="17365D")
         ws.freeze_panes="A2"
     headers=_header_map(ws)
-    required=[name for name in ROBOT_MANAGED_COLUMNS if name!="LOTE"]
+    optional=("LOTE","DATA DE RECEBIMENTO DO E-MAIL")
+    required=[name for name in ROBOT_MANAGED_COLUMNS if name not in optional]
     missing=[name for name in required if name not in headers]
     if missing:raise ValueError("Cabeçalhos operacionais ausentes/irreconhecíveis: "+", ".join(missing))
-    if "LOTE" not in headers:
-        if not is_new:
-            col=ws.max_column+1;ws.cell(1,col,"LOTE")
-            if col>1 and ws.cell(1,col-1).has_style:ws.cell(1,col)._style=copy(ws.cell(1,col-1)._style)
-            headers["LOTE"]=col
-        else:headers=_header_map(ws)
+    for optional_name in optional:
+        if optional_name not in headers:
+            if not is_new:
+                col=ws.max_column+1;ws.cell(1,col,optional_name)
+                if col>1 and ws.cell(1,col-1).has_style:ws.cell(1,col)._style=copy(ws.cell(1,col-1)._style)
+                headers[optional_name]=col
+            else:headers=_header_map(ws)
     company=data.empresa_normalizada or data.tipo_empresa
     process=_norm(data.processo_sei);number=_norm(data.numero_concorrencia_normalizado);org=_norm(data.orgao_normalizado or data.orgao);lot=_norm_lot(data.lote_operacional)
     if not company or not number or not (process or org):raise ValueError("Chave lógica insuficiente; revisão manual necessária")
@@ -97,9 +116,11 @@ def update_workbook(path:Path,data:PolicyData,backup_dir:Path)->str:
     if len(matches)>1:raise ValueError("POSSIVEL_DUPLICATA: múltiplas linhas correspondem à chave; sem alteração")
     existing=bool(matches);row=matches[0] if existing else _available_row(ws)
     if not existing and row==ws.max_row+1 and row>2:_copy_row_style(ws,row-1,row)
-    values={"ÓRGÃO":data.orgao,"EMPRESA":data.empresa or company,"Nº CONCORRÊNCIA/EDITAL":data.numero_concorrencia_original or data.numero_concorrencia_normalizado,"PROCESSO SEI":data.processo_sei,"OBJETO":data.objeto,"VIGÊNCIA DATA INICIAL":data.vigencia_data_inicial,"VIGÊNCIA DATA FINAL":data.vigencia_data_final,"VALOR DO PRÊMIO":data.valor_premio,"Nº REGISTRO DA SUSEP":data.numero_registro_susep,"Nº DA LINHA DIGITÁVEL DO BOLETO":data.linha_digitavel_boleto,"LOTE":data.lote_operacional}
+    values={"ÓRGÃO":data.orgao,"EMPRESA":data.empresa or company,"Nº CONCORRÊNCIA/EDITAL":data.numero_concorrencia_original or data.numero_concorrencia_normalizado,"PROCESSO SEI":data.processo_sei,"OBJETO":data.objeto,"VIGÊNCIA DATA INICIAL":data.vigencia_data_inicial,"VIGÊNCIA DATA FINAL":data.vigencia_data_final,"VALOR DO PRÊMIO":data.valor_premio,"Nº REGISTRO DA SUSEP":data.numero_registro_susep,"Nº DA LINHA DIGITÁVEL DO BOLETO":data.linha_digitavel_boleto,"LOTE":data.lote_operacional,"DATA DE RECEBIMENTO DO E-MAIL":_email_received_datetime(email_received_at)}
     for name,value in values.items():
-        if value is not None:ws.cell(row,headers[name]).value=value
+        if value is not None:
+            cell=ws.cell(row,headers[name]);cell.value=value
+            if name=="DATA DE RECEBIMENTO DO E-MAIL":cell.number_format="dd/mm/yyyy hh:mm:ss"
     if is_new and ws.auto_filter.ref is None:ws.auto_filter.ref=ws.dimensions
     if is_new and ws.max_row>=2:
         heads=[ws.cell(1,col).value for col in range(1,ws.max_column+1)]

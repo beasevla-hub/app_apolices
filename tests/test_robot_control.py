@@ -44,3 +44,14 @@ def test_group_attempts_and_duplicate_hashes_are_scoped_by_lot(tmp_path):
     assert ctl.completed_pair('mail','PAIR-a','same-policy','same-bill',lot='01')
     assert ctl.completed_pair('mail','PAIR-b','same-policy','same-bill',lot='02')
     assert ctl.completed_pair('mail','PAIR-c','same-policy','same-bill',lot='03') is None
+
+def test_multilot_pair_success_requires_exact_hashes_and_exact_lot_set(tmp_path):
+    ctl=RobotControl(tmp_path/'robot.xlsx')
+    ctl.record(message_id='mail',uid='9',group_key='PAIR-multi',status='SUCESSO',hash_apolice='policy-hash',hash_boleto='bill-hash',lotes='["01","02","03","04"]')
+    assert ctl.completed_pair('mail','PAIR-multi','policy-hash','bill-hash',lotes=['01','02','03','04'])
+    assert ctl.completed_pair('mail','PAIR-other','policy-hash','bill-hash',lotes=['01','02','03','04'])
+    assert ctl.completed_pair('mail','PAIR-multi','changed','bill-hash',lotes=['01','02','03','04']) is None
+    assert ctl.completed_pair('mail','PAIR-multi','policy-hash','bill-hash',lotes=['01','02']) is None
+    # Um registro legado escalar não serve como sucesso multilote compatível.
+    ctl.record(message_id='legacy',group_key='PAIR-old',status='SUCESSO',hash_apolice='p',hash_boleto='b',lote='1 e 2')
+    assert ctl.completed_pair('legacy','PAIR-new','p','b',lotes=['01','02']) is None

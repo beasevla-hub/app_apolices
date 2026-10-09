@@ -34,6 +34,24 @@ def test_documentary_lot_equal_to_group_is_retained_but_conflict_is_rejected_by_
     conflict=validate_policy({**data,'lote':{'valor':'2','fonte':'APOLICE','confianca':.98}},lote_associado='1')
     assert conflict.lote_documental=='2' and conflict.lote_operacional=='1'
 
+def test_structured_lots_keep_individual_premiums_and_clear_compound_scalar():
+    evidence=lambda value:{'valor':value,'fonte':'APOLICE','confianca':.97}
+    data=result();data['lote']=evidence('1 e 2');data['lotes']=[{'numero':evidence('1'),'valor_premio':evidence(1100.5)},{'numero':evidence('2'),'valor_premio':evidence(900.25)}]
+    parsed=validate_policy(data,lotes_associados=['1','2']);require_minimum(parsed)
+    assert parsed.lote is None and 'lote' not in parsed.evidencias
+    assert [str(item.numero.valor) for item in parsed.lotes]==['1','2']
+    assert [item.valor_premio.valor for item in parsed.lotes]==[1100.5,900.25]
+    assert parsed.lotes_associados==['1','2'] and parsed.lote_operacional is None
+
+def test_structured_lot_requires_evidence_and_rejects_duplicate_identifiers():
+    evidence=lambda value,confidence=.97:{'valor':value,'fonte':'APOLICE','confianca':confidence}
+    bad=result();bad['lotes']=[{'numero':evidence('1',.4),'valor_premio':evidence(None)}]
+    with pytest.raises(ValueError,match='Confiança/fonte insuficiente no número'):
+        require_minimum(validate_policy(bad))
+    duplicate=result();duplicate['lotes']=[{'numero':evidence('1'),'valor_premio':evidence(None)},{'numero':evidence('1'),'valor_premio':evidence(None)}]
+    with pytest.raises(ValueError,match='duplicado'):
+        require_minimum(validate_policy(duplicate))
+
 def test_company_normalization_accepts_legal_variants_and_preserves_original():
     data=result();data['empresa']={'valor':'SUBPREFEITURA SÃO MATEUS','fonte':'APOLICE','confianca':.98}
     data['empresa_normalizada']={'valor':'thi engenharia e arquitetura ltda.','fonte':'APOLICE','confianca':.98}

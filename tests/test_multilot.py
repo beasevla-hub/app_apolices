@@ -3,7 +3,7 @@ from app.attachment_processor import resolve_groups
 
 def pdf_names(count):return [Path(f'file_{idx:02d}.pdf') for idx in range(1,count+1)]
 def ev(value,confidence=.98):return {'valor':value,'fonte':'APOLICE' if value is not None else 'NAO_IDENTIFICADO','confianca':confidence}
-def group(lot,policy,bill,confidence=.98):return {'lote':ev(lot,confidence),'apolice':policy,'boleto':bill}
+def group(lot,policy,bill,confidence=.98):return {'lote':ev(lot,confidence),'lotes':[ev(lot,confidence)] if lot is not None else [],'apolice':policy,'boleto':bill}
 def test_single_pair_and_unknown_lot():
     files=pdf_names(2);groups,issues=resolve_groups({'grupos':[group(None,files[0].name,files[1].name)],'outros':[],'observacoes':None},files)
     assert len(groups)==1 and groups[0].lote is None and groups[0].problema is None and not issues
@@ -37,3 +37,19 @@ def test_low_confidence_duplicate_lots_and_unclassified_files_require_review():
     groups,issues=resolve_groups(result,files)
     assert all(g.problema for g in groups)
     assert any('não foi classificado' in issue for issue in issues)
+
+def test_one_physical_pair_can_cover_four_lots_without_duplicating_the_pair():
+    files=[Path('apolice_multilote.pdf'),Path('boleto_multilote.pdf')]
+    evidence=[ev(lot) for lot in ('01','02','03','04')]
+    result={'grupos':[{'lote':ev(None,.1),'lotes':evidence,'apolice':files[0].name,'boleto':files[1].name}],'outros':[],'observacoes':None}
+    groups,issues=resolve_groups(result,files)
+    assert len(groups)==1 and groups[0].lote is None
+    assert groups[0].valores_lotes==['01','02','03','04']
+    assert groups[0].apolice==files[0] and groups[0].boleto==files[1]
+    assert groups[0].problema is None and not issues
+
+def test_compound_scalar_lot_is_rejected_instead_of_becoming_one_row():
+    files=pdf_names(2)
+    groups,issues=resolve_groups({'grupos':[{'lote':ev('1 e 2'),'apolice':files[0].name,'boleto':files[1].name}],'outros':[]},files)
+    assert len(groups)==1 and groups[0].problema and 'lista estruturada' in groups[0].problema
+    assert any('texto composto' in issue for issue in issues)

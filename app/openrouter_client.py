@@ -43,5 +43,5 @@ class OpenRouterClient:
     def classify(self, files: list[Path], names: list[str]) -> dict:
         return self._request(role_prompt(names), files, ROLE_SCHEMA)
 
-    def analyze(self, policy: Path, bill: Path, expected_lot: str | None = None) -> dict:
-        return self._request("Anexo 1 = páginas iniciais da APÓLICE; anexo 2 = BOLETO completo do mesmo grupo.\n"+policy_prompt(self.company_names,expected_lot), [policy,bill], POLICY_SCHEMA)
+    def analyze(self, policy: Path, bill: Path, expected_lot: str | None = None, expected_lots:list[str]|None=None) -> dict:
+        return self._request("Anexo 1 = páginas iniciais da APÓLICE; anexo 2 = BOLETO completo associado. O par físico pode cobrir vários lotes e deve continuar sendo analisado uma única vez.\n"+policy_prompt(self.company_names,expected_lot,expected_lots), [policy,bill], POLICY_SCHEMA)

@@ -75,7 +75,7 @@ def _settings_company_maps():
         {"THI":settings.thi_cnpj,"PHAS":settings.phas_cnpj},
     )
 
-def validate_policy(data:dict,configured_names=None,configured_cnpjs=None,lote_associado:str|None=None)->PolicyData:
+def validate_policy(data:dict,configured_names=None,configured_cnpjs=None,lote_associado:str|None=None,lotes_associados:list[str]|None=None)->PolicyData:
     """Achata evidências, normaliza empresa antes do Literal e anexa metadado do grupo.
 
     ``lote`` continua significando exclusivamente lote documental. ``lote_associado``
@@ -88,6 +88,10 @@ def validate_policy(data:dict,configured_names=None,configured_cnpjs=None,lote_a
             evidence[key]=value
             payload[key]=value["valor"]
     payload["evidencias"]={**payload.get("evidencias",{}),**evidence}
+    structured_lots=payload.get("lotes") or []
+    if len(structured_lots)>1:
+        # A lista estruturada prevalece; nunca expor um escalar composto/primeiro lote como o único.
+        payload["lote"]=None;payload["evidencias"].pop("lote",None)
     # A associação do classificador é metadado operacional. Se a análise apenas
     # ecoou o mesmo identificador sem evidência suficiente, não o rotulamos como
     # lote documental nem inventamos uma evidência para justificá-lo.
@@ -131,6 +135,7 @@ def validate_policy(data:dict,configured_names=None,configured_cnpjs=None,lote_a
     if company_evidence is not None:
         payload["evidencias"]["empresa_normalizada"]=company_evidence
     if lote_associado is not None:payload["lote_associado"]=lote_associado
+    if lotes_associados is not None:payload["lotes_associados"]=list(dict.fromkeys(str(value).strip() for value in lotes_associados if str(value).strip()))
     return PolicyData.model_validate(payload)
 
 def require_minimum(data:PolicyData,lote_associado:str|None=None)->None:
@@ -154,4 +159,18 @@ def require_minimum(data:PolicyData,lote_associado:str|None=None)->None:
         if "lote" not in data.evidencias:raise ValueError("Lote documental identificado sem evidência documental")
         if data.evidencias["lote"].fonte=="NAO_IDENTIFICADO":raise ValueError("Lote documental sem fonte identificada")
         if data.confidence_for("lote")<REQUIRED_CONFIDENCE:raise ValueError("Confiança insuficiente para o lote documental identificado")
+    seen_lots=set()
+    for index,item in enumerate(data.lotes,1):
+        number=item.numero.valor
+        if number is None or not str(number).strip():raise ValueError(f"Número ausente no lote estruturado {index}")
+        if item.numero.fonte=="NAO_IDENTIFICADO" or item.numero.confianca<REQUIRED_CONFIDENCE:raise ValueError(f"Confiança/fonte insuficiente no número do lote estruturado {index}")
+        key=_lot_key(number)
+        if key in seen_lots:raise ValueError(f"Lote estruturado duplicado: {number}")
+        seen_lots.add(key)
+        premium=item.valor_premio
+        if premium.valor is not None:
+            if premium.fonte=="NAO_IDENTIFICADO" or premium.confianca<REQUIRED_CONFIDENCE:raise ValueError(f"Confiança/fonte insuficiente no prêmio do lote {number}")
+            try:amount=float(premium.valor)
+            except (TypeError,ValueError) as exc:raise ValueError(f"Prêmio inválido no lote {number}: {premium.valor!r}") from exc
+            if amount<0:raise ValueError(f"Prêmio negativo no lote {number}")
     if data.par_coerente is not True:raise ValueError("Apólice e boleto não tiveram coerência confirmada; revisão manual")

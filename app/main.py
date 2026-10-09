@@ -8,11 +8,13 @@ from .email_client import EmailClient,MailMessage,IMAPConnectionLost
 from .attachment_processor import valid_pdfs,resolve_groups,DocumentGroup
 from .pdf_processor import first_pages
 from .openrouter_client import OpenRouterClient
+from .models import PolicyData
 from .validator import validate_policy,require_minimum
 from .file_manager import sha256,publish,lot_label
 from .excel_robot_control import RobotControl
 from .excel_apolices import update_workbook
 log=get_logger()
+CLASSIFICATION_SCHEMA_VERSION=2
 class CountingOpenRouter:
     """Contabiliza chamadas lógicas efetivamente feitas no lote."""
     def __init__(self,client):self.client=client;self.classifications=0;self.analyses=0
@@ -29,15 +31,27 @@ def _write_json(path:Path,value)->None:
 def _hash_key(value:str)->str:return hashlib.sha256(value.encode()).hexdigest()
 def _group_key(group:DocumentGroup,index:int)->str:
     if group.apolice and group.boleto:
-        pair="|".join((group.lote or "",group.apolice.name,sha256(group.apolice),group.boleto.name,sha256(group.boleto)))
+        lots=group.valores_lotes
+        lot_key=group.lote if len(lots)==1 else ("LOTES:"+json.dumps(lots,ensure_ascii=False,separators=(",",":")) if lots else "")
+        pair="|".join((lot_key,group.apolice.name,sha256(group.apolice),group.boleto.name,sha256(group.boleto)))
         return "PAIR-"+_hash_key(pair)[:24]
     basis=f"{index}|{group.lote or ''}|{group.apolice.name if group.apolice else ''}|{group.boleto.name if group.boleto else ''}"
     return "REVIEW-"+_hash_key(basis)[:20]
-def _lot_equal(first:str,second:str)->bool:
-    def normalize(value):
-        text=" ".join(str(value).casefold().split())
-        return text[5:].strip() if text.startswith("lote ") else text
-    return normalize(first)==normalize(second)
+def _lot_norm(value)->str:
+    text=" ".join(str(value).casefold().split())
+    return text[5:].strip() if text.startswith("lote ") else text
+def _lot_equal(first:str,second:str)->bool:return _lot_norm(first)==_lot_norm(second)
+def _lots_json(values:list[str])->str:return json.dumps(values,ensure_ascii=False,separators=(",",":"))
+def _lot_details(data:PolicyData)->dict[str,object]:
+    result={}
+    for item in data.lotes:
+        value=item.numero.valor
+        if value is not None:result[_lot_norm(value)]=item
+    return result
+def _premium_number(value):
+    if value is None:return None
+    try:return float(value)
+    except (TypeError,ValueError) as exc:raise ValueError(f"Prêmio por lote inválido: {value!r}") from exc
 def _test()->int:
     """Smoke test offline: não acessa e-mail nem serviços externos."""
     from .models import PolicyData,Evidence
@@ -62,7 +76,8 @@ def _record_group_error(control:RobotControl,message:MailMessage,active_group:di
     if completed:
         if detail:detail.update(status="SUCESSO",observacao="Par confirmado como concluído antes da interrupção")
         return True
-    control.record(message_id=message.message_id,uid=message.uid,group_key=active_group["group_key"],lote=active_group.get("lote"),hash_apolice=active_group.get("hash_apolice"),hash_boleto=active_group.get("hash_boleto"),status="ERRO",erro=error,modelo_ia=settings.openrouter_model,id_processamento=active_group.get("id_processamento"),pasta_destino=active_group.get("pasta_destino"))
+    active_lots=active_group.get("lotes") or []
+    control.record(message_id=message.message_id,uid=message.uid,group_key=active_group["group_key"],lote=active_group.get("lote"),lotes=_lots_json(active_lots) if len(active_lots)>1 else None,hash_apolice=active_group.get("hash_apolice"),hash_boleto=active_group.get("hash_boleto"),status="ERRO",erro=error,modelo_ia=settings.openrouter_model,id_processamento=active_group.get("id_processamento"),pasta_destino=active_group.get("pasta_destino"))
     if detail:detail.update(status="ERRO",erro=error)
     return False
 
@@ -88,13 +103,14 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
     """Classifica uma vez; analisa/publica cada par independentemente."""
     client=client or _client();root_dir=root_dir or settings.root_dir;policies_excel=policies_excel or settings.policies_excel
     backup_dir=backup_dir or Path("backups");temp_root=temp_root or Path("data/temp");history_root=history_root or Path("data/historico")
+    email_received_at=message.received_at or message.date
     ident=hashlib.sha256((message.message_id or message.uid).encode()).hexdigest()[:24]
-    process_id=control.begin(message_id=message.message_id,uid=message.uid,data_email=message.date,remetente=message.sender,assunto=message.subject,modelo_ia=settings.openrouter_model)
+    process_id=control.begin(message_id=message.message_id,uid=message.uid,data_email=email_received_at,remetente=message.sender,assunto=message.subject,modelo_ia=settings.openrouter_model)
     run_mode=mode or ("DRY_RUN" if dry_run else "NORMAL")
     if dry_run and run_mode=="BACKFILL":run_mode="BACKFILL_DRY_RUN"
     temp=temp_root/ident/process_id;history=history_root/process_id
     classification_calls=0;analysis_calls=0;cache_hit=False;active_group=None
-    metadata={"id_processamento":process_id,"message_id":message.message_id,"uid":message.uid,"data_email":message.date,"remetente":message.sender,"assunto":message.subject,"modelo":settings.openrouter_model,"timestamp_utc":datetime.now(timezone.utc).isoformat(),"modo_execucao":run_mode,"quantidade_pdfs":0,"quantidade_grupos":0,"quantidade_lotes":0,"lotes":[],"issues":[],"observacoes_classificacao":None,"chamadas_openrouter":{"classificacao":0,"analises":0,"total":0},"classificacao_cache_reutilizada":False}
+    metadata={"id_processamento":process_id,"message_id":message.message_id,"uid":message.uid,"data_email":email_received_at,"remetente":message.sender,"assunto":message.subject,"modelo":settings.openrouter_model,"timestamp_utc":datetime.now(timezone.utc).isoformat(),"modo_execucao":run_mode,"quantidade_pdfs":0,"quantidade_grupos":0,"quantidade_lotes":0,"lotes":[],"issues":[],"observacoes_classificacao":None,"chamadas_openrouter":{"classificacao":0,"analises":0,"total":0},"classificacao_cache_reutilizada":False}
     try:
         temp.mkdir(parents=True,exist_ok=True);history.mkdir(parents=True,exist_ok=True)
         attachments=valid_pdfs(EmailClient.save_pdf_attachments(message,temp));metadata["quantidade_pdfs"]=len(attachments)
@@ -104,15 +120,15 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
         cache_path=history_root/"classificacoes"/(ident+".json");classification=None
         try:
             cached=json.loads(cache_path.read_text(encoding="utf-8"))
-            if cached.get("arquivos_sha256")==hashes_by_name:classification=cached.get("resultado");cache_hit=classification is not None
+            if cached.get("schema_version")==CLASSIFICATION_SCHEMA_VERSION and cached.get("arquivos_sha256")==hashes_by_name:classification=cached.get("resultado");cache_hit=classification is not None
         except (OSError,ValueError,AttributeError):pass
         if classification is None:
             classification_calls=1;metadata["chamadas_openrouter"]={"classificacao":classification_calls,"analises":analysis_calls,"total":classification_calls+analysis_calls}
             classification=client.classify(attachments,[path.name for path in attachments])
-            _write_json(cache_path,{"message_id":message.message_id,"uid":message.uid,"arquivos_sha256":hashes_by_name,"resultado":classification})
+            _write_json(cache_path,{"schema_version":CLASSIFICATION_SCHEMA_VERSION,"message_id":message.message_id,"uid":message.uid,"arquivos_sha256":hashes_by_name,"resultado":classification})
         groups,issues=resolve_groups(classification,attachments)
-        metadata["quantidade_grupos"]=len(groups);metadata["quantidade_lotes"]=len(groups);metadata["issues"]=issues;metadata["observacoes_classificacao"]=classification.get("observacoes")
-        metadata["lotes"]=[{"lote":group.lote,"apolice":group.apolice.name if group.apolice else None,"boleto":group.boleto.name if group.boleto else None,"status":"PENDENTE"} for group in groups]
+        metadata["quantidade_grupos"]=len(groups);metadata["quantidade_lotes"]=sum(len(group.valores_lotes) or 1 for group in groups);metadata["issues"]=issues;metadata["observacoes_classificacao"]=classification.get("observacoes")
+        metadata["lotes"]=[{"lote":group.lote,"lotes":group.valores_lotes,"apolice":group.apolice.name if group.apolice else None,"boleto":group.boleto.name if group.boleto else None,"status":"PENDENTE"} for group in groups]
         metadata["classificacao_cache_reutilizada"]=cache_hit
         multiple_lots=len(groups)>1
         _write_json(history/"metadata.json",metadata)
@@ -120,24 +136,26 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
             detail=metadata["lotes"][index-1];group_key=_group_key(group,index);detail["group_key"]=group_key
             if group.problema:
                 detail.update(status="ERRO",erro=group.problema)
-                issue_process=control.begin(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,modelo_ia=settings.openrouter_model)
-                active_group={"group_key":group_key,"lote":group.lote,"id_processamento":issue_process,"detail":detail}
-                control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,status="ERRO",erro=group.problema,modelo_ia=settings.openrouter_model,id_processamento=issue_process)
+                issue_process=control.begin(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,lotes=_lots_json(group.valores_lotes) if len(group.valores_lotes)>1 else None,modelo_ia=settings.openrouter_model)
+                active_group={"group_key":group_key,"lote":group.lote,"lotes":group.valores_lotes,"id_processamento":issue_process,"detail":detail}
+                control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,lotes=_lots_json(group.valores_lotes) if len(group.valores_lotes)>1 else None,status="ERRO",erro=group.problema,modelo_ia=settings.openrouter_model,id_processamento=issue_process)
                 active_group=None
                 continue
             policy,bill=group.apolice,group.boleto;policy_hash,bill_hash=sha256(policy),sha256(bill)
             detail["hash_apolice"]=policy_hash;detail["hash_boleto"]=bill_hash
-            completed=control.completed_pair(message.message_id,group_key,policy_hash,bill_hash,lot=group.lote)
+            classified_lots=group.valores_lotes
+            requested_lots=classified_lots if len(classified_lots)>1 else None
+            completed=control.completed_pair(message.message_id,group_key,policy_hash,bill_hash,lot=group.lote,lotes=requested_lots)
             if completed:
                 same_group=completed.get("message_id")==message.message_id and (completed.get("group_key") or "")==group_key
                 if not same_group:
                     reused_lot=group.lote if group.lote is not None else (completed.get("lote") or None)
-                    control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=reused_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="SUCESSO",erro=None,modelo_ia=settings.openrouter_model,id_processamento=completed.get("id_processamento"))
+                    control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=reused_lot,lotes=_lots_json(classified_lots) if len(classified_lots)>1 else None,hash_apolice=policy_hash,hash_boleto=bill_hash,status="SUCESSO",erro=None,modelo_ia=settings.openrouter_model,id_processamento=completed.get("id_processamento"))
                 else:reused_lot=completed.get("lote") or group.lote
-                detail.update(status="SUCESSO",lote=reused_lot,lote_associado=group.lote,id_processamento_anterior=completed.get("id_processamento"),observacao="Par já concluído com os mesmos hashes; sem nova análise")
+                detail.update(status="SUCESSO",lote=reused_lot,lotes=classified_lots,lote_associado=group.lote if len(classified_lots)==1 else None,lotes_associados=classified_lots,id_processamento_anterior=completed.get("id_processamento"),observacao="Par já concluído com os mesmos hashes e lotes; sem nova análise")
                 continue
-            group_process=control.begin(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,hash_apolice=policy_hash,hash_boleto=bill_hash,data_email=message.date,remetente=message.sender,assunto=message.subject,modelo_ia=settings.openrouter_model)
-            active_group={"group_key":group_key,"lote":group.lote,"hash_apolice":policy_hash,"hash_boleto":bill_hash,"id_processamento":group_process,"detail":detail,"pasta_destino":None}
+            group_process=control.begin(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=group.lote,lotes=_lots_json(classified_lots) if len(classified_lots)>1 else None,hash_apolice=policy_hash,hash_boleto=bill_hash,data_email=email_received_at,remetente=message.sender,assunto=message.subject,modelo_ia=settings.openrouter_model)
+            active_group={"group_key":group_key,"lote":group.lote,"lotes":classified_lots,"hash_apolice":policy_hash,"hash_boleto":bill_hash,"id_processamento":group_process,"detail":detail,"pasta_destino":None}
             detail.update(status="PROCESSANDO",id_processamento=group_process)
             metadata["chamadas_openrouter"]={"classificacao":classification_calls,"analises":analysis_calls,"total":classification_calls+analysis_calls}
             created=[];destination=None;operational_lot=group.lote
@@ -146,27 +164,52 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
                 policy_analysis=first_pages(policy,temp/(policy.stem+"_analise.pdf"))
                 analysis_calls+=1
                 metadata["chamadas_openrouter"]={"classificacao":classification_calls,"analises":analysis_calls,"total":classification_calls+analysis_calls}
-                if group.lote is None:raw_result=client.analyze(policy_analysis,bill)
+                if len(classified_lots)>1:raw_result=client.analyze(policy_analysis,bill,expected_lots=classified_lots)
+                elif group.lote is None:raw_result=client.analyze(policy_analysis,bill)
                 else:raw_result=client.analyze(policy_analysis,bill,expected_lot=group.lote)
                 lot_result_path=history/"lotes"/group_key/"resultado.json";_write_json(lot_result_path,raw_result)
-                data=validate_policy(raw_result,lote_associado=group.lote)
+                data=validate_policy(raw_result,lote_associado=group.lote,lotes_associados=classified_lots if len(classified_lots)>1 else None)
                 if group.lote is not None and data.lote is not None and not _lot_equal(group.lote,data.lote):
                     raise ValueError(f"Lote da análise ({data.lote!r}) não confirma associação classificada ({group.lote!r})")
                 require_minimum(data,lote_associado=group.lote)
-                if data.lote is not None and "lote" not in data.evidencias:raise ValueError("Extração retornou lote sem evidência; revisão manual")
-                operational_lot=data.lote_operacional
-                active_group["lote"]=operational_lot
-                group_label=lot_label(operational_lot, f"GRUPO {index:02d}") if multiple_lots else None
-                detail.update(lote=operational_lot,lote_associado=group.lote,lote_documental=data.lote,grupo_pasta=group_label,resultado="lotes/"+group_key+"/resultado.json")
+                if data.lote is not None and "lote" not in data.evidencias:raise ValueError("Lote documental identificado sem evidência; revisão manual")
+                analyzed_lots=[str(item.numero.valor).strip() for item in data.lotes if item.numero.valor is not None and str(item.numero.valor).strip()]
+                if len(classified_lots)>1 and not analyzed_lots:
+                    raise ValueError("A análise não retornou a lista estruturada de lotes esperada para este par multilote")
+                if classified_lots and analyzed_lots:
+                    if not all(any(_lot_equal(expected,actual) for actual in analyzed_lots) for expected in classified_lots):
+                        raise ValueError(f"A análise não confirmou todos os lotes classificados: classificados={classified_lots!r}, extraídos={analyzed_lots!r}")
+                    if len(analyzed_lots)>len(classified_lots):
+                        raw_group=next((item for item in classification.get("grupos",[]) if item.get("apolice")==policy.name and item.get("boleto")==bill.name),None)
+                        if raw_group is not None:
+                            raw_group["lotes"]=[{"valor":str(item.numero.valor).strip(),"fonte":item.numero.fonte,"confianca":item.numero.confianca} for item in data.lotes]
+                            raw_group["lote"]={"valor":None,"fonte":"NAO_IDENTIFICADO","confianca":0.0}
+                            _write_json(cache_path,{"schema_version":CLASSIFICATION_SCHEMA_VERSION,"message_id":message.message_id,"uid":message.uid,"arquivos_sha256":hashes_by_name,"resultado":classification})
+                        classified_lots=analyzed_lots
+                lot_values=analyzed_lots or classified_lots or ([data.lote] if data.lote is not None else [])
+                operational_lot=lot_values[0] if len(lot_values)==1 else None
+                active_group["lote"]=operational_lot;active_group["lotes"]=lot_values
+                group_label=(lot_label(operational_lot) if len(lot_values)==1 else "LOTES "+" - ".join(lot_values) if lot_values else f"GRUPO {index:02d}") if multiple_lots else None
+                publication_data=data.model_copy(update={"lote":operational_lot if len(lot_values)==1 else None,"lote_associado":operational_lot if len(lot_values)==1 else None,"lotes_associados":lot_values})
+                detail.update(lote=operational_lot,lotes=lot_values,lote_associado=group.lote if len(lot_values)==1 else None,lotes_associados=classified_lots,lote_documental=data.lote,grupo_pasta=group_label,resultado="lotes/"+group_key+"/resultado.json")
                 if dry_run:
                     from .file_manager import build_destination,build_document_names
-                    detail.update(status="DRY_RUN",destino_previsto=str(build_destination(root_dir,data,multiple_lots,group_label)),nomes_previstos=list(build_document_names(data,multiple_lots,group_label)))
-                    control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="IGNORADO",erro="DRY_RUN: lote analisado sem publicação",modelo_ia=settings.openrouter_model,id_processamento=group_process)
+                    detail.update(status="DRY_RUN",destino_previsto=str(build_destination(root_dir,publication_data,multiple_lots,group_label)),nomes_previstos=list(build_document_names(publication_data,multiple_lots,group_label)))
+                    control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,lotes=_lots_json(lot_values) if len(lot_values)>1 else None,hash_apolice=policy_hash,hash_boleto=bill_hash,status="IGNORADO",erro="DRY_RUN: lote analisado sem publicação",modelo_ia=settings.openrouter_model,id_processamento=group_process)
                     active_group=None
                 else:
-                    destination,created=publish(root_dir,data,policy,bill,return_created=True,multiple_lots=multiple_lots,group_label=group_label)
+                    destination,created=publish(root_dir,publication_data,policy,bill,return_created=True,multiple_lots=multiple_lots,group_label=group_label)
                     active_group["pasta_destino"]=str(destination)
-                    try:update_workbook(policies_excel,data,backup_dir)
+                    try:
+                        details_by_lot=_lot_details(data)
+                        rows_to_write=lot_values or [None]
+                        for row_lot in rows_to_write:
+                            lot_detail=details_by_lot.get(_lot_norm(row_lot)) if row_lot is not None else None
+                            if lot_detail and lot_detail.valor_premio.valor is not None:specific_premium=lot_detail.valor_premio.valor
+                            elif len(lot_values)>1:specific_premium=None
+                            else:specific_premium=data.valor_premio
+                            row_data=data.model_copy(update={"lote":row_lot if row_lot is not None else data.lote,"lote_associado":row_lot if row_lot is not None else None,"lotes_associados":[row_lot] if row_lot is not None else [],"valor_premio":_premium_number(specific_premium)})
+                            update_workbook(policies_excel,row_data,backup_dir,email_received_at=email_received_at)
                     except (Exception,KeyboardInterrupt,SystemExit):
                         cleanup_errors=[]
                         for target in created:
@@ -174,12 +217,12 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
                             except OSError as cleanup_exc:cleanup_errors.append(f"{target.resolve(strict=False)}: {cleanup_exc}")
                         if cleanup_errors:log.error("Rollback após falha do Excel para grupo %s incompleto: %s",group_key,"; ".join(cleanup_errors))
                         raise
-                    control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="SUCESSO",modelo_ia=settings.openrouter_model,pasta_destino=str(destination),id_processamento=group_process)
+                    control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,lotes=_lots_json(lot_values) if len(lot_values)>1 else None,hash_apolice=policy_hash,hash_boleto=bill_hash,status="SUCESSO",modelo_ia=settings.openrouter_model,pasta_destino=str(destination),id_processamento=group_process)
                     detail.update(status="SUCESSO",destino=str(destination),id_processamento=group_process)
                     active_group=None
             except Exception as exc:
                 group_error=str(exc)[:1000]
-                control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,hash_apolice=policy_hash,hash_boleto=bill_hash,status="ERRO",erro=group_error,modelo_ia=settings.openrouter_model,id_processamento=group_process,pasta_destino=str(destination) if destination else None)
+                control.record(message_id=message.message_id,uid=message.uid,group_key=group_key,lote=operational_lot,lotes=_lots_json(active_group.get("lotes") or []) if len(active_group.get("lotes") or [])>1 else None,hash_apolice=policy_hash,hash_boleto=bill_hash,status="ERRO",erro=group_error,modelo_ia=settings.openrouter_model,id_processamento=group_process,pasta_destino=str(destination) if destination else None)
                 detail.update(status="ERRO",erro=group_error);issues.append(f"Grupo {group_key}: {group_error}")
                 active_group=None
                 log.error("[%s] Grupo %s falhou; os demais grupos continuarão: %s",process_id,group_key,exc,exc_info=(type(exc),exc,exc.__traceback__))
@@ -195,7 +238,7 @@ def process_message(message:MailMessage,control:RobotControl,client=None,dry_run
         else:
             overall="ERRO";error="; ".join(issues)[:1000] if issues else "Um ou mais grupos exigem revisão"
         control.record(message_id=message.message_id,uid=message.uid,status=overall,erro=error,modelo_ia=settings.openrouter_model,id_processamento=process_id)
-        metadata.update(status=overall,quantidade_grupos=len(groups),quantidade_lotes=len(groups),lotes=metadata["lotes"],issues=issues,chamadas_openrouter={"classificacao":classification_calls,"analises":analysis_calls,"total":classification_calls+analysis_calls},classificacao_cache_reutilizada=cache_hit)
+        metadata.update(status=overall,quantidade_grupos=len(groups),quantidade_lotes=sum(len(item.get("lotes") or []) or 1 for item in metadata["lotes"]),lotes=metadata["lotes"],issues=issues,chamadas_openrouter={"classificacao":classification_calls,"analises":analysis_calls,"total":classification_calls+analysis_calls},classificacao_cache_reutilizada=cache_hit)
         _write_json(history/"metadata.json",metadata);_write_json(history/"resultado.json",{"grupos":metadata["lotes"],"issues":issues})
         if overall=="SUCESSO" and not settings.keep_success_temp:shutil.rmtree(temp,ignore_errors=True)
         return "DRY_RUN" if dry_run and overall=="IGNORADO" else overall

@@ -14,6 +14,7 @@ class Settings:
     email_user: str = os.getenv("EMAIL_USER", "")
     email_password: str = os.getenv("EMAIL_PASSWORD", "")
     email_folder: str = os.getenv("EMAIL_FOLDER", "INBOX")
+    email_timezone: str = os.getenv("EMAIL_TIMEZONE", "America/Sao_Paulo")
     allowed_sender_domains: tuple[str, ...] = tuple(x.strip().lower() for x in os.getenv("ALLOWED_SENDER_DOMAINS", "@finlandiaseguros.com.br").split(",") if x.strip())
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
     openrouter_model: str = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash")

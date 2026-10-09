@@ -17,7 +17,7 @@ def _is_transport_error(exc:Exception)->bool:
     return False
 @dataclass
 class MailMessage:
-    uid:str;message_id:str;sender:str;subject:str;date:str;raw:bytes
+    uid:str;message_id:str;sender:str;subject:str;date:str;raw:bytes;received_at:str|None=None
 class EmailClient:
     def __init__(self,host:str,port:int,user:str,password:str,folder:str,domains:tuple[str,...],use_ssl:bool=True,reconnect_delays:tuple[int,...]=(2,4,8)):
         self.host,self.port,self.user,self.password,self.folder,self.domains,self.use_ssl=host,port,user,password,folder,domains,use_ssl
@@ -77,9 +77,9 @@ class EmailClient:
     def _messages_from_uids(self,uids:list[bytes]):
         self.last_found_count=len(uids);self.last_relevant_count=0
         for uid in uids:
-            status,parts=self._uid("fetch",uid,b"(BODY.PEEK[])")
+            status,parts=self._uid("fetch",uid,b"(BODY.PEEK[] INTERNALDATE)")
             if status!="OK":continue
-            raw=next((part[1] for part in parts if isinstance(part,tuple)),None)
+            raw=next((part[1] for part in parts if isinstance(part,tuple) and len(part)>1 and isinstance(part[1],bytes) and part[1]),None)
             if not raw:continue
             msg=email.message_from_bytes(raw);sender=str(make_header(decode_header(msg.get("From",""))))
             sender_address=parseaddr(sender)[1].lower()
@@ -87,7 +87,17 @@ class EmailClient:
             self.last_relevant_count+=1;subject=str(make_header(decode_header(msg.get("Subject",""))))
             try:email_date=parsedate_to_datetime(msg.get("Date")).isoformat()
             except Exception:email_date=msg.get("Date","")
-            yield MailMessage(uid.decode(),msg.get("Message-ID","").strip(),sender,subject,email_date,raw)
+            received_at=None
+            for part in parts:
+                metadata_part=part[0] if isinstance(part,tuple) and part else part
+                if not isinstance(metadata_part,bytes):continue
+                marker=b'INTERNALDATE "';start=metadata_part.upper().find(marker)
+                if start<0:continue
+                raw_internal=metadata_part[start+len(marker):].split(b'"',1)[0]
+                try:received_at=parsedate_to_datetime(raw_internal.decode("ascii")).isoformat()
+                except (UnicodeDecodeError,TypeError,ValueError,OverflowError):received_at=None
+                if received_at:break
+            yield MailMessage(uid.decode(),msg.get("Message-ID","").strip(),sender,subject,email_date,raw,received_at)
     def messages(self,limit:int=100):
         uids=self._search_uids("ALL")
         return self._messages_from_uids(uids[-limit:] if limit>0 else uids)

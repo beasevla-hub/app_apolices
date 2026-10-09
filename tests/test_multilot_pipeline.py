@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 import pytest
@@ -14,11 +15,11 @@ def pdf_bytes(width=200,height=200):
     writer=PdfWriter();writer.add_blank_page(width=width,height=height)
     import io
     buffer=io.BytesIO();writer.write(buffer);return buffer.getvalue()
-def make_message(tmp_path,filenames,message_id='multi@example',payload=None):
+def make_message(tmp_path,filenames,message_id='multi@example',payload=None,received_at='2026-09-25'):
     em=EmailMessage();em['From']='arquivo@finlandiaseguros.com.br';em['To']='robot@example.com';em['Subject']='Apólices de lotes';em['Message-ID']=f'<{message_id}>';em.set_content('Documentos para diversos lotes')
     payload=payload or pdf_bytes()
     for name in filenames:em.add_attachment(payload,maintype='application',subtype='pdf',filename=name)
-    return MailMessage('445',f'<{message_id}>','arquivo@finlandiaseguros.com.br',em['Subject'],'2026-09-25',em.as_bytes())
+    return MailMessage('445',f'<{message_id}>','arquivo@finlandiaseguros.com.br',em['Subject'],'2026-09-25',em.as_bytes(),received_at)
 def setup_excel(path):
     wb=Workbook();ws=wb.active;ws.title='APÓLICES';ws.append(ROBOT_MANAGED_COLUMNS);wb.save(path)
 class GroupClient:
@@ -30,7 +31,7 @@ class GroupClient:
         coherent=self.coherence.get(expected_lot,True)
         evidence={'valor':expected_lot,'fonte':'APOLICE','confianca':.98} if expected_lot else {'valor':None,'fonte':'NAO_IDENTIFICADO','confianca':.1}
         return raw_result(lote=evidence,par_coerente=coherent)
-def g(lot,policy,bill):return {'lote':{'valor':lot,'fonte':'APOLICE','confianca':.98},'apolice':policy,'boleto':bill}
+def g(lot,policy,bill):return {'lote':{'valor':lot,'fonte':'APOLICE' if lot else 'NAO_IDENTIFICADO','confianca':.98 if lot else .1},'lotes':[{'valor':lot,'fonte':'APOLICE','confianca':.98}] if lot else [],'apolice':policy,'boleto':bill}
 def run_process(tmp_path,message,client):
     excel=tmp_path/'ops.xlsx';setup_excel(excel);control=RobotControl(tmp_path/'robot.xlsx',max_attempts=4);counting=CountingOpenRouter(client)
     status=process_message(message,control,counting,root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history')
@@ -133,6 +134,91 @@ def test_documentary_lot_conflict_with_associated_group_is_rejected(tmp_path):
     row=next(row for row in control.rows() if (row.get('group_key') or '').startswith('PAIR-'))
     assert row['status']=='ERRO' and 'não confirma associação' in row['erro']
     assert not (tmp_path/'docs').exists() and load_workbook(excel)['APÓLICES'].max_row==1
+
+@pytest.mark.parametrize('lots',[['01','02'],['01','02','03','04']])
+def test_one_physical_pair_creates_one_row_per_lot_with_individual_premium_and_email_datetime(tmp_path,lots):
+    names=['policy_multi.pdf','bill_multi.pdf'];message=make_message(tmp_path,names,'one-pair-many-lots@example',received_at='2026-10-09T11:31:42+00:00')
+    evidence=lambda value:{'valor':value,'fonte':'APOLICE','confianca':.99}
+    group={'lote':{'valor':None,'fonte':'NAO_IDENTIFICADO','confianca':.1},'lotes':[evidence(value) for value in lots],'apolice':names[0],'boleto':names[1]}
+    class OnePairManyLotsClient:
+        def __init__(self):self.classifications=0;self.analyses=[]
+        def classify(self,files,filenames):
+            self.classifications+=1
+            return {'grupos':[group],'outros':[],'observacoes':None}
+        def analyze(self,policy,bill,expected_lots=None):
+            self.analyses.append((policy.name,bill.name,tuple(expected_lots or ())))
+            assert expected_lots==lots
+            details=[{'numero':evidence(value),'valor_premio':{'valor':index*1000.25,'fonte':'APOLICE','confianca':.97}} for index,value in enumerate(lots,1)]
+            return raw_result(lote={'valor':None,'fonte':'NAO_IDENTIFICADO','confianca':.1},lotes=details,valor_premio={'valor':None,'fonte':'NAO_IDENTIFICADO','confianca':.1})
+    excel=tmp_path/'ops.xlsx';setup_excel(excel);control=RobotControl(tmp_path/'robot.xlsx');client=OnePairManyLotsClient();counting=CountingOpenRouter(client)
+    kwargs=dict(root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history')
+    assert process_message(message,control,counting,**kwargs)=='SUCESSO'
+    ws=load_workbook(excel)['APÓLICES'];headers={ws.cell(1,c).value:c for c in range(1,ws.max_column+1)}
+    assert ws.max_row==len(lots)+1
+    assert [ws.cell(row,headers['LOTE']).value for row in range(2,ws.max_row+1)]==lots
+    assert [ws.cell(row,headers['VALOR DO PRÊMIO']).value for row in range(2,ws.max_row+1)]==[index*1000.25 for index in range(1,len(lots)+1)]
+    expected_received=datetime(2026,10,9,8,31,42)
+    received=[ws.cell(row,headers['DATA DE RECEBIMENTO DO E-MAIL']).value for row in range(2,ws.max_row+1)]
+    assert received==[expected_received]*len(lots)
+    assert all(ws.cell(row,headers['DATA DE RECEBIMENTO DO E-MAIL']).number_format=='dd/mm/yyyy hh:mm:ss' for row in range(2,ws.max_row+1))
+    published=list((tmp_path/'docs').rglob('*.pdf'))
+    assert len(published)==2 and {path.name for path in published}=={'01. APOLICE.pdf','08. BOLETO.pdf'}
+    assert client.classifications==1 and len(client.analyses)==1 and client.analyses[0][2]==tuple(lots)
+    # Repetir a execução como BACKFILL preserva as linhas por lote e reutiliza o sucesso técnico do par.
+    assert process_message(message,control,counting,mode='BACKFILL',**kwargs)=='SUCESSO'
+    assert load_workbook(excel)['APÓLICES'].max_row==len(lots)+1
+    assert client.classifications==1 and len(client.analyses)==1
+
+def test_general_premium_is_not_repeated_on_each_multilot_row(tmp_path):
+    lots=['01','02'];names=['policy_general.pdf','bill_general.pdf'];message=make_message(tmp_path,names,'general-premium@example')
+    ev=lambda value,source='APOLICE',confidence=.98:{'valor':value,'fonte':source,'confianca':confidence}
+    group={'lote':ev(None,'NAO_IDENTIFICADO',.1),'lotes':[ev(lot) for lot in lots],'apolice':names[0],'boleto':names[1]}
+    class GeneralPremiumClient:
+        def classify(self,files,filenames):return {'grupos':[group],'outros':[],'observacoes':None}
+        def analyze(self,policy,bill,expected_lots=None):
+            return raw_result(lote=ev(None,'NAO_IDENTIFICADO',.1),lotes=[{'numero':ev(lot),'valor_premio':ev(None,'NAO_IDENTIFICADO',.1)} for lot in lots],valor_premio=ev(4000.0))
+    excel=tmp_path/'ops.xlsx';client=GeneralPremiumClient()
+    status,_,_,_=run_process(tmp_path,message,client)
+    assert status=='SUCESSO'
+    ws=load_workbook(excel)['APÓLICES'];premium_col=next(c for c in range(1,ws.max_column+1) if ws.cell(1,c).value=='VALOR DO PRÊMIO')
+    assert ws.max_row==3 and [ws.cell(r,premium_col).value for r in (2,3)]==[None,None]
+
+def test_analysis_expands_incomplete_single_lot_classification_and_updates_cache(tmp_path):
+    lots=['01','02','03','04'];names=['policy_expand.pdf','bill_expand.pdf'];message=make_message(tmp_path,names,'expand-lots@example')
+    ev=lambda value:{'valor':value,'fonte':'APOLICE','confianca':.99}
+    class ExpandingClient:
+        def __init__(self):self.classifications=0;self.analyses=0
+        def classify(self,files,filenames):
+            self.classifications+=1
+            return {'grupos':[g('01',names[0],names[1])],'outros':[],'observacoes':None}
+        def analyze(self,policy,bill,expected_lot=None,expected_lots=None):
+            self.analyses+=1
+            return raw_result(lote=ev(None),lotes=[{'numero':ev(lot),'valor_premio':ev(index*250.0)} for index,lot in enumerate(lots,1)],valor_premio=ev(None))
+    excel=tmp_path/'ops.xlsx';setup_excel(excel);control=RobotControl(tmp_path/'robot.xlsx');client=ExpandingClient();counting=CountingOpenRouter(client)
+    kwargs=dict(root_dir=tmp_path/'docs',policies_excel=excel,backup_dir=tmp_path/'backups',temp_root=tmp_path/'temp',history_root=tmp_path/'history')
+    assert process_message(message,control,counting,**kwargs)=='SUCESSO'
+    ws=load_workbook(excel)['APÓLICES'];lot_col=next(c for c in range(1,ws.max_column+1) if ws.cell(1,c).value=='LOTE')
+    assert [ws.cell(row,lot_col).value for row in range(2,6)]==lots
+    cache=list((tmp_path/'history'/'classificacoes').glob('*.json'))[0]
+    cached=json.loads(cache.read_text())
+    assert cached['schema_version']>=2 and len(cached['resultado']['grupos'][0]['lotes'])==4
+    assert cached['resultado']['grupos'][0]['lote']['valor'] is None
+    assert client.classifications==1 and client.analyses==1
+    assert process_message(message,control,counting,mode='BACKFILL',**kwargs)=='SUCESSO'
+    assert load_workbook(excel)['APÓLICES'].max_row==5 and client.classifications==1 and client.analyses==1
+
+def test_multilot_pair_is_not_published_when_analysis_omits_the_structured_lot_list(tmp_path):
+    lots=['01','02'];names=['policy_no_lots.pdf','bill_no_lots.pdf'];message=make_message(tmp_path,names,'missing-analysis-lots@example')
+    ev=lambda value,source='APOLICE',confidence=.98:{'valor':value,'fonte':source,'confianca':confidence}
+    group={'lote':ev(None,'NAO_IDENTIFICADO',.1),'lotes':[ev(lot) for lot in lots],'apolice':names[0],'boleto':names[1]}
+    class OmittingClient:
+        def classify(self,files,filenames):return {'grupos':[group],'outros':[],'observacoes':None}
+        def analyze(self,policy,bill,expected_lots=None):return raw_result(lote=ev(None,'NAO_IDENTIFICADO',.1),lotes=[])
+    status,control,excel,_=run_process(tmp_path,message,OmittingClient())
+    assert status=='ERRO' and load_workbook(excel)['APÓLICES'].max_row==1
+    assert not list((tmp_path/'docs').rglob('*.pdf'))
+    failure=next(row for row in control.rows() if row.get('group_key'))
+    assert failure['status']=='ERRO' and 'lista estruturada de lotes' in failure['erro']
 
 
 def test_backfill_reuses_classification_and_reanalyzes_only_failed_group_without_flag(tmp_path):
